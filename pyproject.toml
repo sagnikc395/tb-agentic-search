@@ -1,7 +1,7 @@
 [project]
 name = "latent-annotation"
 version = "0.1.0"
-description = "Agent-based annotation of SAE latents over protein language models"
+description = "Tool-grounded annotation of SAE latents from protein language models"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

@@ -2,48 +2,47 @@
 
 ## The setup
 
-A protein language model (ESM-2, ESM-C, ProtT5) produces a residue-level
-representation whose dimensions are dense and polysemantic — no single dimension
-means one thing. A sparse autoencoder trained on those activations,
+A protein language model such as ESM-2, ESM-C, or ProtT5 produces a vector for
+each residue. Its dimensions are dense and polysemantic: no single dimension has
+one stable meaning. A sparse autoencoder trained on those activations,
 
 ```
 z = ReLU(W_enc (h - b_dec) + b_enc)     # sparse, overcomplete: dim(z) >> dim(h)
 ĥ = W_dec z + b_dec
 ```
 
-gives a much larger set of latents where each fires on a small fraction of
-residues. The bet is that this sparse basis is closer to the model's actual
-features than the raw dimensions are.
+produces a larger set of latents, each active on a small fraction of residues. The
+hypothesis is that these sparse latents correspond more closely to features used by
+the model than the original dimensions do.
 
-That bet is only cashable if you can say what each latent means. With 10k–100k
-latents, hand-inspection does not scale — which is the entire reason for an
-annotation agent.
+Testing that hypothesis requires descriptions of the latents. An SAE may contain
+10,000 to 100,000 of them, too many to inspect one by one.
 
 ## Why "annotation" is harder than it sounds
 
-The naive pipeline — show a model the top-activating sequences, ask for a label — is
-the one that produces impressive demos and unusable results. Three specific problems:
+Showing a model the top-activating sequences and asking for a label leaves three
+problems:
 
 1. **The model will always find a pattern.** Given any set of protein fragments, an
    LLM produces a fluent explanation. A label with no falsification condition is not
-   a finding. Hence `disconfirming_evidence` as a required schema field.
+   a finding. The schema therefore requires `disconfirming_evidence`.
 
 2. **Top-k activations are a biased sample.** They over-represent whatever the
    corpus over-represents. A latent that "fires on kinases" may be tracking the most
-   common fold in the dataset rather than kinase-ness. Hence `rejected_hypotheses`,
-   and the prompt's instruction to look for the site the label does not explain.
+   common fold in the dataset rather than a kinase-specific feature. The schema
+   requires `rejected_hypotheses`, and the prompt asks for a site the proposed label
+   does not explain.
 
 3. **Protein-level facts do not license residue-level claims.** "These are all
    kinases" is guilt by association. "These peaks fall inside the annotated
-   ATP-binding region at positions X, Y, Z" is a positional claim, checkable against
+   ATP-binding region at positions X, Y, and Z" is a positional claim that can be checked against
    the peak index. `UniProt_get_features_by_accession` and
-   `InterPro_get_residue_annotations` are what let the agent make the second kind.
+   `InterPro_get_residue_annotations` provide the records needed for that check.
 
-The literature precedent is Bills et al. (2023), *Language models can explain
-neurons in language models* — explain, then **simulate** the explanation and score
-it against real activations. The simulation step is what makes an explanation
-falsifiable, and it is the main thing missing from this repo today (see
-[04-roadmap.md](04-roadmap.md)).
+Bills et al. (2023), *Language models can explain neurons in language models*,
+first generate an explanation and then use it to predict activations. Comparing
+those predictions with observed activations gives the explanation a score. This
+repository does not yet implement that step; see [04-roadmap.md](04-roadmap.md).
 
 ## Mutation effect prediction: why latents are interesting here
 
@@ -54,65 +53,60 @@ score,
 score(wt -> mut at position i) = log p(mut | context) - log p(wt | context)
 ```
 
-evaluated against deep mutational scanning data (ProteinGym, MaveDB). It works, and
-it is a black box: you get a number, not a reason.
+and is evaluated against deep mutational scanning data from ProteinGym or MaveDB.
+The score alone does not identify which internal features changed.
 
-SAE latents offer a decomposition. If you can attribute the score to a handful of
-interpretable latents, you get a mechanistic account of *why* a substitution is
-predicted damaging — "it ablates the latent that marks the catalytic-site
-configuration" rather than "the log-odds went down."
+SAE latents may provide that decomposition. If a few annotated latents account for
+the score change, the explanation can name them: "the substitution suppresses a
+latent associated with the catalytic-site configuration," for example.
 
-Three research directions this repo could support:
+The repository could support three experiments.
 
-**A. Latents as an explanation layer.** Compute the variant score as usual, then
-attribute it across latents that change between wild-type and mutant. The annotation
-agent supplies the human-readable name for each contributing latent. This is the
-lowest-risk direction: the prediction is unchanged, the interpretation is new.
+**A. Use latents to explain an existing score.** Compute the variant score as usual,
+then attribute its change across latents that differ between the wild type and the
+mutant. The agent supplies a label for each contributing latent. This experiment
+does not change the predictor.
 
-**B. Latents as features.** Fit a lightweight model on latent activations at the
-mutated position, benchmarked against the masked-marginal baseline on ProteinGym.
-Interesting if it wins; interesting in a different way if a sparse, interpretable
-feature set matches a dense baseline.
+**B. Use latents as predictor inputs.** Fit a small model on latent activations at
+the mutated position and compare it with the masked-marginal baseline on
+ProteinGym. The result measures how much predictive signal the sparse features
+retain.
 
-**C. Annotation-guided priors.** If a latent is annotated `active_or_binding_site`
-with high confidence, substitutions that ablate it should be predicted more
-damaging. This is the direction the `mutation_effect` field in the annotation schema
-is built for — it forces the agent to state a testable expectation
-(`predicted_sensitivity`) at annotation time, which can then be scored against DMS
-data it never saw.
+**C. Test annotation-guided priors.** If a latent has a high-confidence
+`active_or_binding_site` label, substitutions that suppress it should have larger
+effects. The `mutation_effect.predicted_sensitivity` field records this prediction
+before the agent sees DMS data.
 
-Direction C is where the agent stops being a labelling convenience and starts
-producing hypotheses. It is also the one that can be evaluated cheaply: correlate
-`predicted_sensitivity` against measured DMS effect at the residues each latent
-fires on.
+Direction C produces a direct test: correlate `predicted_sensitivity` with the
+measured DMS effects at residues where each latent fires.
 
-## Agents for mutation effect specifically
+## A separate mutation-effect agent
 
-`MUTATION_EFFECT_TOOLS` in `config.py` is the second tool set, for an agent whose
-question is "is this latent's territory mutation-sensitive?":
+`MUTATION_EFFECT_TOOLS` contains the tools needed to ask whether substitutions at
+a latent's firing sites have measured effects:
 
 | Tool | Role |
 |---|---|
-| `UniProt_get_disease_variants_by_accession` | curated pathogenic variants — do they land on the firing sites |
+| `UniProt_get_disease_variants_by_accession` | whether curated pathogenic variants land on the firing sites |
 | `MaveDB_search_score_sets` / `MaveDB_get_variant_scores` | experimental DMS measurements for these proteins |
-| `MaveDB_get_effect_matrix` | one-shot DMS loader — parses HGVS to (ref, position, alt) and filters to single substitutions, which is exactly the shape a per-residue evaluation needs |
+| `MaveDB_get_effect_matrix` | parses HGVS into (reference, position, alternate) and keeps single substitutions |
 | `ClinVar_search_variants` | clinical significance of substitutions at the site |
 | `gnomad_get_constraint` | population-level depletion of variation |
 
-The clean experimental design: withhold the DMS data at annotation time, let the
-agent predict sensitivity from structure and function alone, then score it. If the
-agent can look up MaveDB while annotating, you have measured retrieval, not
-prediction. Two tool sets, two agents, evaluated separately.
+Withhold DMS data during annotation. Let the annotation agent predict sensitivity
+from structure and function, then let a second process compare that prediction with
+MaveDB or ProteinGym. If the first agent can retrieve DMS measurements, the test
+measures retrieval rather than prediction.
 
-## Caveats worth writing down before running experiments
+## Experimental limits
 
 - **SAE latents are not stable across training runs.** Two SAEs on the same
   activations give different bases. Any claim about "the catalytic site latent"
-  needs a cross-run reproducibility check, and annotations should be diffable —
-  another argument for the structured schema.
+  needs a cross-run reproducibility check. Structured annotations make those runs
+  easier to compare.
 - **Feature splitting.** Wider SAEs split one concept into several narrower ones.
   The same annotation may legitimately apply to multiple latents at higher width.
-- **Reconstruction ≠ interpretability.** A better L0/reconstruction tradeoff does not
+- **Reconstruction is not interpretability.** A better L0/reconstruction tradeoff does not
   imply more interpretable latents; measure them separately.
 - **Annotation is an LLM output, not ground truth.** Report inter-run agreement and
   a human-audited subset before treating annotations as labels in a downstream claim.

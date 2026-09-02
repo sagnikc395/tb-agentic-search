@@ -1,15 +1,8 @@
-"""Tool surface for the annotation agent.
+"""Build and dispatch the annotation agent's tools.
 
-Two kinds of tools reach the model through one dispatcher:
-
-* **ToolUniverse tools** — 2,500+ scientific database endpoints (UniProt, InterPro,
-  Pfam, Reactome, MaveDB, ClinVar, gnomAD, ...). ToolUniverse emits OpenAI-shaped
-  specs directly, which is the format Qwen-3 expects over the HuggingFace API.
-* **Local tools** — evidence lookup over the SAE activations, which lives in this
-  process and never round-trips to a database.
-
-Keeping both behind a single `ToolBox` means the agent loop doesn't care where a
-tool runs, and the tool list stays stable across requests.
+ToolUniverse tools query scientific databases. Local tools read SAE evidence from
+this process. `ToolBox` presents both as OpenAI-style functions and dispatches each
+call by name.
 """
 
 from __future__ import annotations
@@ -21,9 +14,9 @@ from typing import Any, Callable, Sequence
 from . import config
 from .evidence import LatentEvidenceStore
 
-# Which ToolUniverse tools to expose is a configuration decision — see
+# The ToolUniverse allowlists are in
 # `PROTEIN_CONTEXT_TOOLS` / `MUTATION_EFFECT_TOOLS` in config.py, and
-# notes/02-tooluniverse.md for the rationale.
+# notes/02-tooluniverse.md for the selection criteria.
 
 
 @dataclass
@@ -56,7 +49,7 @@ class ToolBox:
     # -- definitions -------------------------------------------------------
 
     def definitions(self) -> list[dict[str, Any]]:
-        """OpenAI-style function definitions, cached so the list stays stable."""
+        """Return a cached list of OpenAI-style function definitions."""
         if self._definitions is None:
             defs = [
                 _as_function(tool.name, tool.description, tool.input_schema)
@@ -89,9 +82,7 @@ class ToolBox:
     def run(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         """Execute a tool call. Returns ``(result_text, is_error)``.
 
-        Errors come back as tool results rather than exceptions so the agent can
-        recover — a failed accession lookup should make it try another accession,
-        not kill the annotation run.
+        Errors become tool results so the model can try another accession.
         """
         try:
             if name in self._local:
@@ -107,7 +98,9 @@ class ToolBox:
         return _stringify(result), False
 
 
-def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
+def _as_function(
+    name: str, description: str, parameters: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
@@ -119,8 +112,7 @@ def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dic
 
 
 def _stringify(result: Any, *, limit: int = config.TOOL_RESULT_LIMIT) -> str:
-    """Serialize a tool result, truncated — one UniProt entry can otherwise eat
-    most of the context window before the agent has looked at anything else."""
+    """Serialize a tool result and stop it at the configured character limit."""
     if isinstance(result, str):
         text = result
     else:
@@ -146,12 +138,11 @@ def evidence_tools(store: LatentEvidenceStore) -> list[LocalTool]:
         LocalTool(
             name="get_latent_evidence",
             description=(
-                "Return the evidence bundle for one SAE latent: its top-activating "
-                "sequence windows (with the peak residue bracketed), the UniProt "
-                "accessions those windows come from, firing rate, and activation "
-                "statistics. Call this first for any latent you are asked to "
-                "annotate — it is the only source of ground-truth activation data, "
-                "and the accessions it returns are the inputs to the database tools."
+                "Return one SAE latent's strongest sequence windows, with brackets "
+                "around each peak, plus their UniProt accessions and activation "
+                "statistics. Call this before annotating a latent. It is the source "
+                "of activation data, and its accessions are inputs to the database "
+                "tools."
             ),
             input_schema={
                 "type": "object",
@@ -175,10 +166,10 @@ def evidence_tools(store: LatentEvidenceStore) -> list[LocalTool]:
 
 
 def load_tooluniverse(tool_names: Sequence[str]):
-    """Load ToolUniverse with only the tools we intend to expose.
+    """Load ToolUniverse and verify the tools selected for this run.
 
-    Importing lazily keeps `evidence.py` and the agent's schema importable in
-    environments where ToolUniverse isn't installed.
+    The lazy import lets the evidence and schema modules load without
+    ToolUniverse.
     """
     from tooluniverse import ToolUniverse
 

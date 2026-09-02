@@ -1,9 +1,8 @@
-"""Generate a small activation fixture so the agent can be run without an SAE.
+"""Generate activation data for a run without an SAE checkpoint.
 
-The accessions are real (so the database tools hit real records); the sequence
-fragments are synthetic stand-ins carrying the motif each latent is supposed to
-detect. Replace this whole file with a dump from your own SAE — the agent only
-ever sees `proteins` + `activations`.
+The accessions refer to real database records. The sequence fragments are synthetic
+and contain the motifs assigned below. A real SAE export only needs the same
+`proteins` and `activations` keys.
 
     uv run python examples/make_fixture.py
 """
@@ -71,17 +70,14 @@ PROTEINS = [
     ),
 ]
 
-# Three latents chosen to span the range the annotator has to handle: one sharp
-# and specific, one broad-but-real, one that should come back as noise. If every
-# fixture latent is cleanly interpretable you never see whether the agent is
-# calibrated.
+# The three fixture latents cover a narrow motif, a broad chemical pattern, and a
+# weak label. This checks whether the agent uses low-confidence output types.
 LATENTS = {
-    # Glycine-rich nucleotide-binding loop — sharp, structurally meaningful.
+    # Glycine-rich nucleotide-binding loop: narrow and structurally meaningful.
     "L-0142": re.compile(r"G.G..G"),
-    # Acidic pairs — real chemistry, but fires nearly everywhere; a good test of
-    # whether the agent reaches for `polysemantic` instead of over-labelling.
+    # Acidic pairs occur often; this should not receive a narrow label.
     "L-0731": re.compile(r"[DE][DE]"),
-    # Any aromatic residue — the honest answer here is `uninterpretable`.
+    # Any aromatic residue: expected to be `uninterpretable`.
     "L-1503": re.compile(r"[FWY]"),
 }
 

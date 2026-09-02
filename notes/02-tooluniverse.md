@@ -1,12 +1,11 @@
-# What to do with ToolUniverse here
+# Using ToolUniverse
 
 ## What it is
 
-ToolUniverse packages ~2,600 scientific database endpoints behind one uniform
-interface: load once, get OpenAI-shaped tool specs, call by name with a dict. The
-existing `main.py` in this repo already does the two operations that matter —
-`tu.load_tools()` and `tu.tool_specification(name, format="openai")`. That is the
-groundwork; the rest is deciding *which* tools and *what for*.
+ToolUniverse puts about 2,600 scientific database endpoints behind one interface.
+Load the catalog, request an OpenAI-shaped specification, then call a tool by name
+with a dictionary of arguments. `main.py` covers discovery and specification
+lookup. The annotation agent uses only a small subset of the catalog.
 
 ```python
 tu = ToolUniverse(); tu.load_tools()
@@ -15,35 +14,33 @@ tu.tool_specification(name, format="openai") # spec -> straight into the tools a
 tu.run({"name": name, "arguments": {...}})   # execution
 ```
 
-Because the specs are already OpenAI-shaped, they drop into a Qwen-3 `tools`
-array with only a `{"type": "function", "function": ...}` wrapper —
-`ToolBox._as_function` in `tools.py`.
+`ToolBox._as_function` wraps each specification as
+`{"type": "function", "function": ...}` for Qwen-3.
 
 ## The load-everything trap
 
-`load_tools()` gives you 2,599 tools. Passing all of them to a model is the single
-most common mistake with ToolUniverse:
+`load_tools()` gives you the full catalog. Do not pass the catalog to the model:
 
-- Their schemas would be roughly a megabyte of context on *every* request.
-- Selection accuracy collapses — dozens of tools have near-identical descriptions
+- The schemas would add roughly a megabyte to every request.
+- Dozens of tools have similar descriptions, so the model has trouble choosing
   (there are 43 UniProt tools and 78 matching "Ensembl").
-- Latency and cost scale with the tool list, per turn, forever.
+- Latency and cost increase on every turn.
 
-So: load everything for *discovery* during development, expose a curated handful at
-*runtime*. `PROTEIN_CONTEXT_TOOLS` in `config.py` is nine tools, chosen because each
-answers a distinct question about a latent's top-activating proteins. If a latent
-needs a tool outside that set, that is a signal to write a second agent
-configuration, not to widen the default list.
+Load the catalog during development, but expose only the selected tools at runtime.
+`PROTEIN_CONTEXT_TOOLS` contains nine tools. Each answers a different question
+about the proteins behind a latent's strongest activations. A task that needs other
+tools should get a separate configuration instead of expanding every annotation
+request.
 
-For genuinely large tool sets, the escalation path is retrieval over tools —
-ToolUniverse ships `tool_finder` and `find_tools_by_pattern` — where a first pass
-selects ~10 relevant tools and only those are exposed. Worth it above roughly 30
-tools; premature below that.
+If a task needs a large catalog, retrieve tools before the model call.
+ToolUniverse provides `tool_finder` and `find_tools_by_pattern`; a first pass can
+select about ten tools and expose only those. This extra stage starts to pay off
+when the fixed list grows past roughly 30 tools.
 
 ## Tool sets that map to this project's questions
 
-**Interpreting a latent** (`PROTEIN_CONTEXT_TOOLS`) — given the accessions behind the
-top-activating windows, what do the annotated records say?
+`PROTEIN_CONTEXT_TOOLS` answers questions about the accessions behind the strongest
+activation windows:
 
 | Tool | Answers |
 |---|---|
@@ -57,38 +54,36 @@ top-activating windows, what do the annotated records say?
 | `Pfam_get_protein_annotations` | family assignment |
 | `Reactome_map_uniprot_to_pathways` | pathway context |
 
-`UniProt_get_features_by_accession` is the load-bearing one. It is what turns "this
-latent fires on kinases" into "this latent fires on residues inside the annotated
-ATP-binding region of these kinases" — a positional claim that can be checked
-against the peak index, rather than a guilt-by-association claim about the protein.
+`UniProt_get_features_by_accession` supports residue-level checks. "This latent
+fires on kinases" is a protein-level association. "These peaks fall inside the
+annotated ATP-binding regions" can be checked against the peak indices.
 
-**Mutation effect** (`MUTATION_EFFECT_TOOLS`) — see
+`MUTATION_EFFECT_TOOLS` supports the separate mutation-effect experiment described in
 [03-sae-and-mutation-effects.md](03-sae-and-mutation-effects.md):
 `UniProt_get_disease_variants_by_accession`, `MaveDB_search_score_sets`,
 `MaveDB_get_variant_scores`, `ClinVar_search_variants`, `gnomad_get_constraint`.
 
-**Discovered but unused so far**, worth knowing about: `InterPro_get_residue_annotations`
-(residue-level, the natural next step for positional claims), `alphafold_get_annotations`
-(structural context for the peak residue), `InterProScan_scan_sequence` (annotate a
-sequence with no accession — relevant if the SAE corpus includes unannotated
-proteins), `EBI_msa_align` (conservation at the firing site).
+Other candidates are `InterPro_get_residue_annotations` for residue-level records,
+`alphafold_get_annotations` for structural context, `InterProScan_scan_sequence`
+for sequences without accessions, and `EBI_msa_align` for conservation at the
+firing site. None is exposed by default.
 
 ## Operational notes
 
-- **Tool calls are live network requests.** Annotating 1,000 latents × ~6 lookups
-  is 6,000 API calls to EBI/UniProt. Enable ToolUniverse's cache (`use_cache=True`
-  on `run`, `dump_cache()` to persist) and expect to rate-limit.
+- **Tool calls use live network services.** Six lookups for each of 1,000 latents
+  means 6,000 requests to services such as EBI and UniProt. Use ToolUniverse's
+  cache (`use_cache=True` on `run`, then `dump_cache()`) and limit the request rate.
 - **Results are large.** One UniProt entry can exceed the useful context budget on
   its own; `_stringify` truncates at 8k characters. If truncation is cutting the
   informative part, prefer a narrower tool over a bigger limit.
-- **Failures are data.** A dead accession or a 500 comes back as an `is_error` tool
-  result so the model can try another accession. Silent retries would hide a real
-  signal: which parts of the annotation corpus are unreachable.
+- **Failures stay in the trace.** A missing accession or an HTTP 500 becomes an
+  `is_error` result, so the model can try another accession. This also records
+  which parts of the corpus could not be retrieved.
 - **Keep the tool list ordered and stable.** Reordering changes the prompt prefix
   and defeats any provider-side caching; it also makes runs non-comparable.
 
 ## Extending
 
-Adding a tool is one line in the relevant tuple in `config.py`. Before adding one,
-answer: which field of the annotation schema does this tool make more accurate? If
-none, it is context you are paying for on every request and not using.
+Add a tool to the relevant tuple in `config.py`. It should supply evidence for a
+specific schema field; otherwise its definition consumes context without improving
+the annotation.

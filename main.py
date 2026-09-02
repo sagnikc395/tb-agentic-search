@@ -1,9 +1,9 @@
-"""ToolUniverse discovery helper — find tools worth adding to the agent's surface.
+"""Search ToolUniverse for tools to add to an agent configuration.
 
-The agent itself exposes a curated handful of tools (see latent_annotation/tools.py
-and notes/02-tooluniverse.md). This script is for the other half of the job:
-searching the full catalog (~2,600 tools, and it grows with each ToolUniverse
-release) when you need a capability the curated set does not cover.
+The annotation agent exposes the allowlist in `latent_annotation/config.py`. This
+script searches the full catalog when that list does not contain the needed
+database operation. The catalog currently contains about 2,600 tools and changes
+between ToolUniverse releases.
 
     uv run python main.py                  # summarize the catalog
     uv run python main.py UniProt InterPro # search by pattern
@@ -22,7 +22,9 @@ from latent_annotation.config import MUTATION_EFFECT_TOOLS, PROTEIN_CONTEXT_TOOL
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("patterns", nargs="*", help="substrings to search tool names for")
+    parser.add_argument(
+        "patterns", nargs="*", help="substrings to search tool names for"
+    )
     parser.add_argument("--spec", help="print the full OpenAI spec for one tool")
     parser.add_argument("--limit", type=int, default=25, help="max hits per pattern")
     args = parser.parse_args()
@@ -42,7 +44,9 @@ def main() -> None:
         print("\nReserved for the mutation-effect agent:")
         for name in MUTATION_EFFECT_TOOLS:
             print(f"  {name}")
-        print("\nPass patterns to search, e.g. `uv run python main.py MaveDB alphafold`.")
+        print(
+            "\nPass patterns to search, e.g. `uv run python main.py MaveDB alphafold`."
+        )
         return
 
     names = list(tu.all_tool_dict)

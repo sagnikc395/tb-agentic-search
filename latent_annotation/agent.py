@@ -1,11 +1,8 @@
-"""The annotation agent: a tool-use loop over an OpenAI-shaped chat interface.
+"""Run the annotation loop over an OpenAI-shaped chat interface.
 
-The loop is deliberately explicit rather than delegated to a framework, for two
-reasons specific to this project: we want the per-latent tool trace as a research
-artifact (which tools an annotation actually consulted is part of the result), and
-open-weights tool calling is inconsistent enough that the failure modes need to be
-visible — a model that answers without calling `get_latent_evidence` has
-hallucinated its annotation, and the loop should be able to say so.
+The code keeps the loop explicit so each result includes its tool trace. The loop
+also exposes failures from open-weight models. In particular, a label produced
+before `get_latent_evidence` runs has no activation evidence.
 
 Shape of one annotation:
 
@@ -27,12 +24,10 @@ from .llm import ChatClient, ChatResponse
 from .schema import ANNOTATION_SCHEMA, SYSTEM_PROMPT, extract_json, validate_annotation
 from .tools import ToolBox
 
-# Open-weights models skip tools more often than frontier ones. If the model tries
-# to answer before reading the evidence, we push back once instead of accepting an
-# annotation that was invented rather than observed.
+# If the model answers before reading the evidence, ask once for the missing call.
 NUDGE_MISSING_EVIDENCE = (
-    "You have not called `get_latent_evidence` yet, so you have not seen a single "
-    "activation. Call it for this latent before proposing any label."
+    "You have not called `get_latent_evidence`, so the proposed label has no "
+    "activation data. Call it for this latent before answering."
 )
 
 
@@ -52,7 +47,7 @@ class AnnotationResult:
 
 
 class LatentAnnotationAgent:
-    """Annotates SAE latents one at a time, with a fresh context per latent."""
+    """Annotate SAE latents one at a time with a new context for each latent."""
 
     def __init__(
         self, client: ChatClient, toolbox: ToolBox, config: AgentConfig | None = None
@@ -68,9 +63,8 @@ class LatentAnnotationAgent:
     ) -> AnnotationResult:
         task = (
             f"Annotate latent {latent_id}.\n\n"
-            "Start by calling get_latent_evidence, then verify your reading against "
-            "the database tools before committing to a label. When you are done, "
-            "reply with the annotation as a single JSON object and nothing else."
+            "Call get_latent_evidence first. Check the proposed label against the "
+            "available database records. Return only one JSON annotation object."
         )
         if extra_instructions:
             task += f"\n\nAdditional context for this run:\n{extra_instructions}"
@@ -92,7 +86,7 @@ class LatentAnnotationAgent:
                 messages.extend(self._run_tools(response, result))
                 continue
 
-            # No tool calls: the model is trying to answer.
+            # With no tool calls, treat the response as a proposed final answer.
             if (
                 self.config.require_evidence_tool
                 and not nudged
@@ -113,7 +107,7 @@ class LatentAnnotationAgent:
                             "role": "user",
                             "content": (
                                 f"That reply could not be parsed as JSON ({parse_error}). "
-                                "Reply with the annotation object only — no prose, no code fence."
+                                "Return only the annotation object, without prose or a code fence."
                             ),
                         }
                     )

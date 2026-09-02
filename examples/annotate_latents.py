@@ -1,11 +1,12 @@
-"""End-to-end demo: annotate SAE latents with a tool-using agent.
+"""Run the latent-annotation pipeline.
 
     uv run python examples/annotate_latents.py                       # mock model, offline
     uv run python examples/annotate_latents.py --provider huggingface  # Qwen-3, needs HF_TOKEN
     uv run python examples/annotate_latents.py L-0142                # one latent
     uv run python examples/annotate_latents.py --show-evidence       # no model at all
 
-Provider defaults to `huggingface` when HF_TOKEN is set in `.env`, otherwise `mock`.
+The provider defaults to `huggingface` when `.env` contains `HF_TOKEN`; otherwise
+it defaults to `mock`.
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ from latent_annotation.llm import load_client
 from latent_annotation.tools import ToolBox, evidence_tools, load_tooluniverse
 
 
-def build_toolbox(store: LatentEvidenceStore, *, with_tooluniverse: bool = True) -> ToolBox:
+def build_toolbox(
+    store: LatentEvidenceStore, *, with_tooluniverse: bool = True
+) -> ToolBox:
     if not with_tooluniverse:
         return ToolBox(local_tools=evidence_tools(store))
     tu = load_tooluniverse(PROTEIN_CONTEXT_TOOLS)
@@ -37,12 +40,16 @@ def build_toolbox(store: LatentEvidenceStore, *, with_tooluniverse: bool = True)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("latents", nargs="*", help="latent ids (default: all in the fixture)")
+    parser.add_argument(
+        "latents", nargs="*", help="latent ids (default: all in the fixture)"
+    )
     parser.add_argument("--provider", choices=["mock", "huggingface"], default=None)
     parser.add_argument("--model", default=None, help="HF model id (default: Qwen-3)")
     parser.add_argument("--fixture", type=Path, default=FIXTURE_PATH)
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH)
-    parser.add_argument("--no-tooluniverse", action="store_true", help="local tools only")
+    parser.add_argument(
+        "--no-tooluniverse", action="store_true", help="local tools only"
+    )
     parser.add_argument(
         "--show-evidence",
         action="store_true",
@@ -102,7 +109,9 @@ def main() -> int:
                 + "\n"
             )
 
-    print(f"\nwrote {args.output} ({len(latent_ids) - failures}/{len(latent_ids)} clean)")
+    print(
+        f"\nwrote {args.output} ({len(latent_ids) - failures}/{len(latent_ids)} clean)"
+    )
     return 1 if failures else 0
 
 

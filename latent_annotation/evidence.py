@@ -1,12 +1,8 @@
-"""Turn raw SAE activations into the evidence an annotator agent can reason about.
+"""Build annotation evidence from raw SAE activations.
 
-An SAE latent is only interpretable through the inputs that fire it. This module
-takes per-residue activations for one latent over a corpus of proteins and
-produces a compact, quotable evidence bundle: top-activating windows, the
-accessions behind them, and simple firing statistics.
-
-Deliberately dependency-free (plain lists, no torch/numpy) so the evidence layer
-can be unit-tested without a model checkpoint.
+For each latent, this module returns the strongest sequence windows, their
+accessions, and firing statistics. It uses plain Python lists rather than torch or
+numpy, so it can run without a model checkpoint.
 """
 
 from __future__ import annotations
@@ -21,7 +17,7 @@ from . import config
 
 @dataclass(frozen=True)
 class ProteinRecord:
-    """One sequence in the corpus the SAE was run over."""
+    """One sequence from the corpus used to collect SAE activations."""
 
     protein_id: str
     sequence: str
@@ -38,13 +34,13 @@ class LatentExample:
     max_activation: float
     peak_index: int
     window_start: int
-    highlighted: str  # the window, with the peak residue bracketed
+    highlighted: str  # sequence window with brackets around the peak
     description: str | None = None
 
 
 @dataclass
 class LatentEvidence:
-    """Everything the agent gets to see about one latent before it calls tools."""
+    """Activation evidence available to the agent before database lookups."""
 
     latent_id: str
     examples: list[LatentExample] = field(default_factory=list)
@@ -74,7 +70,7 @@ class LatentEvidence:
 
 
 def _highlight(sequence: str, start: int, peak: int, span: int) -> str:
-    """Bracket the peak residue inside a window so the model can see where it fired."""
+    """Put brackets around the peak and nearby residues in a sequence window."""
     local = peak - start
     if not 0 <= local < len(sequence):
         return sequence
@@ -144,18 +140,19 @@ def build_latent_evidence(
         latent_id=latent_id,
         examples=examples,
         firing_rate=(n_active / n_residues) if n_residues else 0.0,
-        mean_active_activation=(sum(active_values) / len(active_values)) if active_values else 0.0,
+        mean_active_activation=(sum(active_values) / len(active_values))
+        if active_values
+        else 0.0,
         max_activation=max((p[0] for p in peaks), default=0.0),
         n_proteins_scanned=scanned,
     )
 
 
 class LatentEvidenceStore:
-    """Lookup of precomputed evidence, keyed by latent id.
+    """Store precomputed evidence by latent id.
 
-    The agent reads from this through a tool rather than getting every latent
-    stuffed into its prompt, so annotating 10,000 latents costs the same context
-    per latent as annotating one.
+    The agent retrieves one record through a tool. Its prompt therefore does not
+    grow with the number of latents in the store.
     """
 
     def __init__(self, evidence: Iterable[LatentEvidence]):

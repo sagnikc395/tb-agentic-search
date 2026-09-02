@@ -1,20 +1,11 @@
-"""Central configuration for the project.
+"""Project configuration.
 
-Every tunable lives here so a change is visible in one file instead of buried in
-the module that happens to use it. Modules import the constants they need and
-fall back to them as defaults, so callers can still override per call (e.g. a
-different model for a smoke test) without touching config.
+Code settings cover tool lists, evidence windows, loop limits, and result length.
+Environment settings select the provider, model, and API token. Functions use
+these values as defaults and may override them per call.
 
-Two kinds of configuration:
-
-* **Code settings** — tool lists, evidence windowing, agent loop limits,
-  result truncation. Change the value here.
-* **Environment settings** — provider, model id, API token. These are read from
-  the environment / `.env` (see `.env.example`); the constants below are the
-  variable *names* and the fallback defaults.
-
-Nothing in this module imports the rest of the package, so any module can import
-from it without creating cycles.
+This module imports no other package module, which keeps it free of dependency
+cycles.
 """
 
 from __future__ import annotations
@@ -34,8 +25,8 @@ ENV_FILE = ".env"
 # ---------------------------------------------------------------------------
 # Environment variable names
 # ---------------------------------------------------------------------------
-# Documented in .env.example. LLM_PROVIDER selects the model layer (mock or
-# huggingface); HF_TOKEN is the API token, HUGGINGFACE_API_KEY accepted as an
+# Documented in .env.example. LLM_PROVIDER selects mock or HuggingFace; HF_TOKEN
+# is the API token, HUGGINGFACE_API_KEY is accepted as an
 # alias; LLM_MODEL overrides the default model id.
 
 ENV_LLM_PROVIDER = "LLM_PROVIDER"
@@ -56,9 +47,8 @@ TIMEOUT_SECONDS = 180.0
 # emit the schema instead of the tool call when both are active.
 USE_RESPONSE_FORMAT = True
 
-# The database tool MockChatClient calls after fetching evidence, so an offline
-# run exercises a real ToolUniverse round-trip. Must be one of the tools the
-# toolbox actually exposes — i.e. a member of PROTEIN_CONTEXT_TOOLS below.
+# MockChatClient calls this database tool after fetching evidence. It must appear
+# in PROTEIN_CONTEXT_TOOLS below.
 MOCK_LOOKUP_TOOL = "UniProt_get_function_by_accession"
 
 # ---------------------------------------------------------------------------
@@ -68,7 +58,7 @@ MOCK_LOOKUP_TOOL = "UniProt_get_function_by_accession"
 
 @dataclass
 class AgentConfig:
-    """Knobs for the per-latent tool-use loop."""
+    """Settings for one latent's tool-use loop."""
 
     max_turns: int = 12
     require_evidence_tool: bool = True  # nudge once if the model answers ungrounded
@@ -87,9 +77,10 @@ ACTIVE_THRESHOLD = 0.0  # activation above this counts as "firing"
 # ---------------------------------------------------------------------------
 # Tool surface (latent_annotation/tools.py)
 # ---------------------------------------------------------------------------
-# Curated starting sets. Full catalog: `ToolUniverse().load_tools()` then
-# `find_tools_by_pattern("UniProt")`. Keep these lists short and ordered — every
-# entry costs context on every request, and reordering invalidates the cache.
+# Curated starting sets. To search the full catalog, call
+# `ToolUniverse().load_tools()` and then `find_tools_by_pattern("UniProt")`.
+# Keep these lists short and ordered. Each entry uses context on every request,
+# and reordering invalidates the prompt cache.
 
 PROTEIN_CONTEXT_TOOLS: tuple[str, ...] = (
     "UniProt_get_recommended_name_by_accession",
@@ -112,7 +103,6 @@ MUTATION_EFFECT_TOOLS: tuple[str, ...] = (
     "gnomad_get_constraint",
 )
 
-# Tool results are serialized and truncated to this many characters — one
-# UniProt entry can otherwise eat the context window before the agent has
-# looked at anything else.
+# Stop serialized tool results at this length so one UniProt entry cannot fill
+# the context window.
 TOOL_RESULT_LIMIT = 8_000

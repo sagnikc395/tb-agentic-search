@@ -1,12 +1,8 @@
-"""Model layer: a thin chat interface with a Qwen-3/HuggingFace backend and a mock.
+"""Chat clients for HuggingFace models and offline tests.
 
-The agent loop talks to `ChatClient`, never to a vendor SDK. That split exists so
-the annotation logic can be developed and tested with `MockChatClient` — no token,
-no network, deterministic — and swapped to a real Qwen-3 endpoint by changing one
-environment variable.
-
-Messages and tools use the OpenAI chat-completions shape, which is what the
-HuggingFace router speaks and what ToolUniverse already emits for tool specs.
+The agent depends on `ChatClient`, not a vendor SDK. `MockChatClient` runs without
+a model call, while `HuggingFaceChatClient` sends the same message and tool shapes
+to a Qwen-3 endpoint. Both use OpenAI-style chat messages and function definitions.
 """
 
 from __future__ import annotations
@@ -29,7 +25,7 @@ class ToolCall:
 
 @dataclass
 class ChatResponse:
-    """Normalized reply: either tool calls to run, or final text."""
+    """A normalized reply containing tool calls or final text."""
 
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
@@ -56,13 +52,11 @@ class ChatClient(Protocol):
 
 
 class HuggingFaceChatClient:
-    """Qwen-3 (or any tool-calling model) through the HuggingFace Inference API.
+    """Call Qwen-3 or another tool-calling model through HuggingFace.
 
-    Routing is HF's: `provider="auto"` picks whichever inference provider currently
-    serves the model. Tool calling and JSON-schema response formats are supported
-    unevenly across providers, so `_parse_json` also recovers a JSON object from
-    plain text — Qwen wraps it in a code fence often enough that relying on
-    `response_format` alone loses annotations.
+    With `provider="auto"`, HuggingFace selects a provider that serves the model.
+    Support for tool calls and `response_format` differs by provider. The schema
+    module therefore parses and validates the returned text on the client side.
     """
 
     def __init__(
@@ -78,7 +72,9 @@ class HuggingFaceChatClient:
     ):
         from huggingface_hub import InferenceClient
 
-        token = token or os.getenv(config.ENV_HF_TOKEN) or os.getenv(config.ENV_HF_API_KEY)
+        token = (
+            token or os.getenv(config.ENV_HF_TOKEN) or os.getenv(config.ENV_HF_API_KEY)
+        )
         if not token:
             raise RuntimeError(
                 "No HuggingFace token. Set HF_TOKEN in .env, or use the mock provider."
@@ -87,7 +83,9 @@ class HuggingFaceChatClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.use_response_format = use_response_format
-        self._client = InferenceClient(provider=provider, api_key=token, timeout=timeout)
+        self._client = InferenceClient(
+            provider=provider, api_key=token, timeout=timeout
+        )
 
     def complete(
         self,
@@ -105,8 +103,8 @@ class HuggingFaceChatClient:
         if tools:
             kwargs["tools"] = list(tools)
             kwargs["tool_choice"] = "auto"
-        # Only constrain the format once the model has stopped calling tools —
-        # forcing a schema while tools are still in play makes some providers
+        # Only constrain the format once the model has stopped calling tools.
+        # When tools and a schema are both active, some providers
         # emit the schema instead of the tool call.
         if response_schema and self.use_response_format and not tools:
             kwargs["response_format"] = {
@@ -135,11 +133,13 @@ class HuggingFaceChatClient:
                 "completion_tokens": completion.usage.completion_tokens or 0,
             }
 
-        return ChatResponse(text=(message.content or "").strip(), tool_calls=tool_calls, usage=usage)
+        return ChatResponse(
+            text=(message.content or "").strip(), tool_calls=tool_calls, usage=usage
+        )
 
 
 def _coerce_arguments(arguments: Any) -> dict[str, Any]:
-    """Tool-call arguments come back as a JSON string from some providers, a dict from others."""
+    """Normalize tool arguments returned as either a JSON string or a dictionary."""
     if isinstance(arguments, dict):
         return arguments
     if not arguments:
@@ -157,12 +157,11 @@ def _coerce_arguments(arguments: Any) -> dict[str, Any]:
 
 
 class MockChatClient:
-    """Offline stand-in that exercises the whole loop without a model.
+    """Run the full agent loop without a model call.
 
-    It follows the same trajectory a real run should: fetch the latent evidence,
-    look up the top accession, then emit a schema-shaped annotation derived from
-    the tool results it actually saw. That makes it useful beyond smoke-testing —
-    if the tool plumbing or the schema is wrong, the mock run fails too.
+    The mock fetches latent evidence, looks up the first accession, and returns an
+    annotation built from those tool results. It tests tool dispatch and schema
+    handling without testing biological interpretation.
     """
 
     def __init__(self, *, lookup_tool: str = config.MOCK_LOOKUP_TOOL):
@@ -188,7 +187,11 @@ class MockChatClient:
 
         evidence = _first_json(seen.get("get_latent_evidence", ""))
         accessions = (evidence or {}).get("accessions", [])
-        if accessions and self.lookup_tool in available and self.lookup_tool not in seen:
+        if (
+            accessions
+            and self.lookup_tool in available
+            and self.lookup_tool not in seen
+        ):
             return ChatResponse(
                 tool_calls=[
                     ToolCall("mock-2", self.lookup_tool, {"accession": accessions[0]})
@@ -196,7 +199,9 @@ class MockChatClient:
             )
 
         return ChatResponse(
-            text=json.dumps(_mock_annotation(latent_id, evidence, self.lookup_tool, seen)),
+            text=json.dumps(
+                _mock_annotation(latent_id, evidence, self.lookup_tool, seen)
+            ),
             usage={"prompt_tokens": 0, "completion_tokens": 0},
         )
 
@@ -206,7 +211,7 @@ def _tool_name(tool: dict[str, Any]) -> str:
 
 
 def _tool_results(messages: Sequence[dict[str, Any]]) -> dict[str, str]:
-    """Map tool name -> result text, for tool results already in the transcript."""
+    """Map each tool name to its latest result in the transcript."""
     names: dict[str, str] = {}
     by_id: dict[str, str] = {}
     for message in messages:
@@ -248,8 +253,7 @@ def _mock_annotation(
     examples = evidence.get("examples", [])
     windows = ", ".join(ex.get("highlighted", "") for ex in examples[:3])
 
-    # Firing rate alone decides the mock's verdict — crude, but it means the mock
-    # produces different concept types across the fixture instead of one canned answer.
+    # Vary the fixture outputs by firing rate instead of returning one fixed type.
     if rate > 0.06:
         concept_type, confidence = "uninterpretable", "low"
     elif rate > 0.04:
@@ -277,10 +281,10 @@ def _mock_annotation(
         "latent_id": latent_id,
         "label": f"MOCK annotation for {latent_id}",
         "description": (
-            "Placeholder annotation produced by MockChatClient. It reports the "
+            "MockChatClient produced this placeholder. It reports the "
             f"observed firing rate ({rate:.4f}) across {evidence.get('n_proteins_scanned', 0)} "
             "proteins and the accessions behind the top windows, but performs no "
-            "biological reasoning. Set LLM_PROVIDER=huggingface for a real annotation."
+            "biological interpretation. Set LLM_PROVIDER=huggingface to run a model."
         ),
         "concept_type": concept_type,
         "confidence": confidence,
@@ -328,7 +332,9 @@ def load_client(
         return HuggingFaceChatClient(
             model=model or os.getenv(config.ENV_LLM_MODEL) or config.DEFAULT_MODEL
         )
-    raise ValueError(f"unknown LLM provider {provider!r} (expected 'mock' or 'huggingface')")
+    raise ValueError(
+        f"unknown LLM provider {provider!r} (expected 'mock' or 'huggingface')"
+    )
 
 
 def _load_dotenv(env_file: str) -> None:

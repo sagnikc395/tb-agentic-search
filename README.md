@@ -1,11 +1,12 @@
 # latent-annotation
 
-Agent-based annotation of sparse autoencoder latents over protein language models.
+Annotate sparse-autoencoder (SAE) latents from protein language models.
 
-An agent is given one SAE latent, pulls its top-activating sequence windows, looks
-the proteins up in UniProt / InterPro / Pfam / Reactome through
-[ToolUniverse](https://github.com/mims-harvard/ToolUniverse), and returns a
-structured, cited annotation , including what would falsify it.
+For each latent, the agent fetches the sequence windows with the highest
+activations. It then checks the proteins in UniProt, InterPro, Pfam, and Reactome
+through [ToolUniverse](https://github.com/mims-harvard/ToolUniverse). The result is
+a structured annotation with a source for each claim, rejected alternatives, and
+an observation that would falsify the label.
 
 ## Run it
 
@@ -22,31 +23,29 @@ uv run python examples/annotate_latents.py --provider huggingface
 uv run python examples/annotate_latents.py --provider huggingface --model Qwen/Qwen3-32B
 ```
 
-The default model layer is `MockChatClient` — a scripted client that walks the same
-tool trajectory a real run does (fetch evidence → look up the top accession → emit
-a schema-shaped annotation) without a token or network access to the model. Live
-ToolUniverse calls still happen, so a mock run exercises the whole pipeline except
-the reasoning.
+The default model client is `MockChatClient`. It follows the same path as a model:
+fetch evidence, look up the first accession, and return an annotation that matches
+the schema. It needs no model token or model API call. ToolUniverse requests still
+run, so the mock covers the full pipeline except biological interpretation.
 
 ## Layout
 
 ```
 latent_annotation/
-  config.py     every tunable in one place: tool lists, model defaults, evidence windowing, agent loop limits
+  config.py     tool lists, model defaults, evidence windowing, and loop limits
   evidence.py   SAE activations -> top-activating windows, firing stats (no torch/numpy)
   tools.py      ToolUniverse + local tools behind one dispatcher
-  llm.py        ChatClient protocol; Qwen-3 via HuggingFace, plus the mock
+  llm.py        ChatClient protocol, Qwen-3 through HuggingFace, and the mock
   agent.py      the tool-use loop
   schema.py     annotation JSON schema, system prompt, JSON extraction/validation
 examples/
-  make_fixture.py       synthetic activations (real accessions, illustrative fragments)
+  make_fixture.py       synthetic activations with real accessions
   annotate_latents.py   end-to-end demo
-notes/          background: agents, ToolUniverse, SAEs and mutation effects, roadmap, codebase map
+notes/          design notes, research directions, roadmap, and codebase map
 ```
 
-`latent_annotation/__init__.py` is deliberately empty — import from the
-submodules directly (e.g. `from latent_annotation.evidence import LatentEvidenceStore`)
-so it is always clear which module a symbol comes from.
+`latent_annotation/__init__.py` is empty. Import from the defining submodule, for
+example `from latent_annotation.evidence import LatentEvidenceStore`.
 
 ## Using your own SAE
 
@@ -61,8 +60,8 @@ store = LatentEvidenceStore.from_activation_dump(
 )
 ```
 
-Everything downstream is unchanged.
+The rest of the pipeline does not depend on how the activations were produced.
 
 ## Notes
 
-Design rationale and research planning live in [`notes/`](notes/README.md).
+See [`notes/`](notes/README.md) for the design decisions and research plan.
