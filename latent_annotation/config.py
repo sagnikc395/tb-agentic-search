@@ -13,21 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = REPO_ROOT / "examples" / "fixtures" / "latents.json"
 OUTPUT_PATH = REPO_ROOT / "examples" / "annotations.jsonl"
 ENV_FILE = ".env"
-
-# ---------------------------------------------------------------------------
-# Environment variable names
-# ---------------------------------------------------------------------------
-# Documented in .env.example. LLM_PROVIDER selects mock or HuggingFace; HF_TOKEN
-# is the API token, HUGGINGFACE_API_KEY is accepted as an
-# alias; LLM_MODEL overrides the default model id.
 
 ENV_LLM_PROVIDER = "LLM_PROVIDER"
 ENV_LLM_MODEL = "LLM_MODEL"
