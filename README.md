@@ -1,77 +1,90 @@
 # latent-annotation
 
-Annotate sparse-autoencoder (SAE) latents from protein language models.
+An agent that takes `(protein, mutation)` and returns a mechanistic, structurally
+grounded, falsifiable explanation of the SAE latents involved — with no human in
+PyMOL at any point.
 
-For each latent, the agent fetches the sequence windows with the highest
-activations. It then checks the proteins in UniProt, InterPro, Pfam, and Reactome
-through [ToolUniverse](https://github.com/mims-harvard/ToolUniverse). The result is
-a structured annotation with a source for each claim, rejected alternatives, and
-an observation that would falsify the label.
+The architectural bet from [`PLAN.md`](PLAN.md) is a split of labour:
+
+| layer | who does it |
+|---|---|
+| structural facts (contacts, burial, motif spans, latent category) | deterministic code |
+| orchestration (which layer, which latents, when to escalate/stop) | agent |
+| hypothesis + narration | agent, as a *proposal to be tested* |
+| verification (every claim → a recorded tool return) | deterministic code |
+
+Protein evidence comes from UniProt, InterPro, and related resources through
+[ToolUniverse](https://github.com/mims-harvard/ToolUniverse). Claims that cannot be
+traced to a tool call in the recorded trace are dropped rather than softened.
+
+## Status
+
+**Stage 0 of the plan, plus the first slice of Stage 1.** The full loop
+(`GROUND → SCORE → PLAN → CIRCUIT → ANNOTATE → HYPOTHESIZE → TEST → VERIFY → REPORT`)
+is walked end to end, but only `ground` (in ToolUniverse mode) and `categorize_latent`
+are real. ESM scores, SAE activations, circuit construction, 3D contacts, and agent
+hypothesis generation are mocked. Nothing here is a biological result yet; it exists
+so the orchestration, the deterministic annotation, the citations, and the trace are
+showable before any GPU or API time is spent.
 
 ## Run it
 
-This repository currently contains a **minimal viable, offline prototype** of the
-Stage 0 loop in `PLAN.md`. It is intentionally not installable and does not claim
-biological validity yet: structure, ESM scores, SAE activations, and hypotheses are
-mocked so the orchestration, deterministic annotation, citations, and trace can be
-shown to an advisor before GPU/API work.
-
-Run it directly from the repository root:
+Not installable yet — run from the repository root.
 
 ```bash
 python examples/annotate_latents.py --dry-run --mut L7D
 python examples/annotate_latents.py --dry-run --mut L7D --json
 ```
 
-To use the supplied DNAJA1/InterPro data path through ToolUniverse:
+Live evidence through ToolUniverse (DNAJA1 only for now):
 
 ```bash
 python examples/annotate_latents.py --tooluniverse --protein DNAJA1 --mut L7D
 ```
 
-This calls `UniProt_search`, `UniProt_get_sequence_by_accession`,
+That path calls `UniProt_search`, `UniProt_get_sequence_by_accession`,
 `UniProt_get_features_by_accession`, `InterPro_get_protein_domains`, and
-`InterPro_get_residue_annotations` for reviewed human DNAJA1 (`P31689`). It fails loudly on missing ToolUniverse or network/API errors, and records (rather
-than hides) numbering mismatches. For example, the live UniProt sequence reports
-Y7 while the plan’s construct mutation is L7D; that discrepancy is now visible in
-the report and should be resolved before interpreting the mutation biologically.
-The current slice still leaves ESM, SAE activations, and 3D contact computation for
-the next stage; it does not present those as real evidence.
+`InterPro_get_residue_annotations` for reviewed human DNAJA1 (`P31689`). It fails
+loudly on a missing ToolUniverse install or an API error, and records — rather than
+hides — numbering mismatches: the live UniProt sequence reports Y7 where the plan's
+construct mutation is L7D. That discrepancy surfaces in the report as a numbering
+warning and is exactly what Stage 1's `numbering.align_constructs` must settle.
 
 ## Layout
 
 ```
 latent_annotation/
-  config.py     tool lists, model defaults, evidence windowing, and loop limits
-  evidence.py   SAE activations -> top-activating windows, firing stats (no torch/numpy)
-  tools.py      ToolUniverse + local tools behind one dispatcher
-  llm.py        ChatClient protocol, Qwen-3 through HuggingFace, and the mock
-  agent.py      the tool-use loop
-  schema.py     annotation JSON schema, system prompt, JSON extraction/validation
+  schema.py                 LatentRole, ToolCall, the six H.3 categories
+  tools.py                  mutation parsing, offline fixture grounding, mock LLR,
+                            mock latents, and categorize_latent (deterministic)
+  tooluniverse_adapter.py   live UniProt/InterPro grounding via ToolUniverse
+  agent.py                  the loop: explain() plus Markdown/JSON reporting
 examples/
-  make_fixture.py       synthetic activations with real accessions
-  annotate_latents.py   end-to-end demo
-notes/          design notes, research directions, roadmap, and codebase map
+  annotate_latents.py       CLI over the loop
+PLAN.md                     staged plan this repo is being built against
 ```
 
-`latent_annotation/__init__.py` is empty. Import from the defining submodule, for
-example `from latent_annotation.evidence import LatentEvidenceStore`.
+`categorize_latent` is the core deliverable in miniature: it assigns per-token
+attribution mass to `mutation_site`, `3d_contact`, `sequence_local`, `hpd_motif`,
+`other_residues`, or `unresolved_diffuse`, applying the paper's H.3 priority order
+with an entropy-based diffuseness threshold ahead of the argmax. It already runs on
+synthetic attribution grids, as the plan's write order requires, so it is ready the
+day a real circuit exists.
 
-## Using your own SAE
+## What comes next
 
-The only coupling point is `LatentEvidenceStore`:
+Per [`PLAN.md`](PLAN.md):
 
-```python
-from latent_annotation.evidence import LatentEvidenceStore, ProteinRecord
+- **Stage 1** — real `fetch_pdb`, `align_constructs` (asserting construct 7 = Leu and
+  30–32 = HPD), heavy-atom `contact_map`, `rel_sasa`, programmatic motif spans.
+- **Stage 2** — ESM-2 masked-marginal LLR gated on Spearman ≈ 0.803 vs ProteinGym,
+  then attribution → greedy restore → τ=0.8 → backward prune.
+- **Stage 3** — random-latent and random-residue nulls, giving a p-value for the
+  39.1% contact-enrichment claim.
+- **Stage 4** — `categorize_latent` validated against hand labels, then run over all
+  circuit nodes rather than the top 15.
+- **Stage 5–8** — MCP registry alongside ToolUniverse, claim-drop rate as a result in
+  its own right, the ToolUniverse panel swap, falsification tools, second protein.
 
-store = LatentEvidenceStore.from_activation_dump(
-    proteins=[ProteinRecord("EGFR", sequence, accession="P00533")],
-    activations={"L-0142": {"EGFR": [0.0, 0.0, 2.4, ...]}},  # per-residue, per latent
-)
-```
-
-The rest of the pipeline does not depend on how the activations were produced.
-
-## Notes
-
-See [`notes/`](notes/README.md) for the design decisions and research plan.
+Two rules hold throughout: every tool must be usable without the agent, and every
+artifact must carry provenance.
