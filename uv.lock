@@ -1547,21 +1547,13 @@ wheels = [
 [[package]]
 name = "latent-annotation"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "jsonschema" },
-    { name = "python-dotenv" },
     { name = "tooluniverse" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "huggingface-hub", specifier = ">=1.0" },
-    { name = "jsonschema", specifier = ">=4.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "tooluniverse" },
-]
+requires-dist = [{ name = "tooluniverse" }]
 
 [[package]]
 name = "lxml"

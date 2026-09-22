@@ -1,181 +1,121 @@
-"""Build and dispatch the annotation agent's tools.
-
-ToolUniverse tools query scientific databases. Local tools read SAE evidence from
-this process. `ToolBox` presents both as OpenAI-style functions and dispatches each
-call by name.
-"""
-
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+import math
+from collections.abc import Iterable
+from typing import Any
 
-from . import config
-from .evidence import LatentEvidenceStore
-
-# The ToolUniverse allowlists are in
-# `PROTEIN_CONTEXT_TOOLS` / `MUTATION_EFFECT_TOOLS` in config.py, and
-# notes/02-tooluniverse.md for the selection criteria.
+from .schema import CATEGORIES, LatentRole, ToolCall
 
 
-@dataclass
-class LocalTool:
-    """A tool backed by a Python callable in this process."""
-
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    handler: Callable[[dict[str, Any]], Any]
-
-
-class ToolBox:
-    """Assembles tool definitions and dispatches calls by name."""
-
-    def __init__(
-        self,
-        *,
-        tooluniverse: Any | None = None,
-        tooluniverse_tools: Sequence[str] = (),
-        local_tools: Sequence[LocalTool] = (),
-    ):
-        self._tu = tooluniverse
-        self._tu_names = tuple(tooluniverse_tools)
-        self._local = {tool.name: tool for tool in local_tools}
-        if self._tu_names and self._tu is None:
-            raise ValueError("tooluniverse_tools given without a tooluniverse instance")
-        self._definitions: list[dict[str, Any]] | None = None
-
-    # -- definitions -------------------------------------------------------
-
-    def definitions(self) -> list[dict[str, Any]]:
-        """Return a cached list of OpenAI-style function definitions."""
-        if self._definitions is None:
-            defs = [
-                _as_function(tool.name, tool.description, tool.input_schema)
-                for tool in self._local.values()
-            ]
-            defs.extend(self._tooluniverse_definitions())
-            self._definitions = defs
-        return self._definitions
-
-    def names(self) -> list[str]:
-        return [definition["function"]["name"] for definition in self.definitions()]
-
-    def _tooluniverse_definitions(self) -> list[dict[str, Any]]:
-        definitions = []
-        for name in self._tu_names:
-            spec = self._tu.tool_specification(name, format="openai")
-            if not spec:
-                raise ValueError(f"ToolUniverse has no tool named {name!r}")
-            definitions.append(
-                _as_function(
-                    spec["name"],
-                    spec.get("description", ""),
-                    spec.get("parameters", {"type": "object", "properties": {}}),
-                )
-            )
-        return definitions
-
-    # -- dispatch ----------------------------------------------------------
-
-    def run(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        """Execute a tool call. Returns ``(result_text, is_error)``.
-
-        Errors become tool results so the model can try another accession.
-        """
-        try:
-            if name in self._local:
-                result = self._local[name].handler(arguments)
-            elif name in self._tu_names:
-                result = self._tu.run(
-                    {"name": name, "arguments": arguments}, verbose=False
-                )
-            else:
-                return f"Error: unknown tool {name!r}.", True
-        except Exception as exc:  # noqa: BLE001 - surfaced to the model, not swallowed
-            return f"Error calling {name}: {type(exc).__name__}: {exc}", True
-        return _stringify(result), False
-
-
-def _as_function(
-    name: str, description: str, parameters: dict[str, Any]
-) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-        },
+# A deliberately small fixture: it lets the architecture be tested before GPU/data work.
+PROTEINS = {
+    "DNAJA1": {
+        "sequence": "MSTAGKL AKD AAKKAGVEAG DDDDDHPDLA VDQVEKAAE AAGVEAKKLA LAA".replace(" ", ""),
+        "structure": "2LO1",
+        "chain": "A",
+        "motif_spans": {"HPD": [30, 31, 32]},
     }
+}
 
 
-def _stringify(result: Any, *, limit: int = config.TOOL_RESULT_LIMIT) -> str:
-    """Serialize a tool result and stop it at the configured character limit."""
-    if isinstance(result, str):
-        text = result
-    else:
-        try:
-            text = json.dumps(result, indent=2, default=str)
-        except (TypeError, ValueError):
-            text = str(result)
-    if len(text) > limit:
-        text = text[:limit] + f"\n... [truncated at {limit} characters]"
-    return text
+def parse_mutation(mutation: str) -> tuple[int, str, str]:
+    mutation = mutation.strip().upper()
+    if len(mutation) < 3 or not mutation[0].isalpha() or not mutation[-1].isalpha() or not mutation[1:-1].isdigit():
+        raise ValueError("mutation must look like L7D")
+    position = int(mutation[1:-1])
+    if position < 1:
+        raise ValueError("mutation position must be positive")
+    return position, mutation[0], mutation[-1]
 
 
-def evidence_tools(store: LatentEvidenceStore) -> list[LocalTool]:
-    """Local tools that expose the SAE evidence store to the agent."""
+def _call(name: str, arguments: dict[str, Any], result: dict[str, Any]) -> ToolCall:
+    return ToolCall(name=name, arguments=arguments, result=result)
 
-    def get_evidence(args: dict[str, Any]) -> Any:
-        return store.get(args["latent_id"]).to_dict()
 
-    def list_latents(_: dict[str, Any]) -> Any:
-        return {"latent_ids": store.latent_ids, "count": len(store)}
+def ground(protein: str, mutation: str) -> tuple[dict[str, Any], ToolCall]:
+    protein = protein.upper()
+    if protein not in PROTEINS:
+        raise ValueError(f"no offline fixture for {protein}; use DNAJA1 for the prototype")
+    position, wild_type, replacement = parse_mutation(mutation)
+    record = PROTEINS[protein]
+    sequence = record["sequence"]
+    observed = sequence[position - 1] if position <= len(sequence) else "?"
+    if observed != wild_type:
+        raise ValueError(
+            f"fixture says position {position} is {observed}, not {wild_type}; "
+            "the prototype refuses to guess"
+        )
+    # Synthetic contact set stands in for the future PDB heavy-atom calculation.
+    contacts = sorted({position - 1, position, position + 1, 22, 48, 51})
+    result = {
+        "protein": protein,
+        "mutation": f"{wild_type}{position}{replacement}",
+        "sequence_length": len(sequence),
+        "structure": record["structure"],
+        "chain": record["chain"],
+        "wild_type": wild_type,
+        "contacts_within_5A": contacts,
+        "motif_spans": record["motif_spans"],
+        "status": "synthetic fixture; replace with PDB/UniProt tools in Stage 1",
+    }
+    return result, _call("ground_structure", {"protein": protein, "mutation": mutation}, result)
 
+
+def score(mutation: str) -> tuple[dict[str, Any], ToolCall]:
+    position, wild_type, replacement = parse_mutation(mutation)
+    # A stable mock score makes loop/report development reproducible.
+    score_value = round(-0.35 - (abs(ord(replacement) - ord(wild_type)) / 100), 3)
+    result = {"mutation": f"{wild_type}{position}{replacement}", "masked_marginal_llr": score_value, "source": "mock"}
+    return result, _call("mock_masked_marginal_llr", {"mutation": mutation}, result)
+
+
+def _category(position: int, residue: int, contacts: set[int], motif: set[int], window: int) -> str:
+    if residue == position:
+        return "mutation_site"
+    if residue in contacts:
+        return "3d_contact"
+    if abs(residue - position) <= window:
+        return "sequence_local"
+    if residue in motif:
+        return "hpd_motif"
+    return "other_residues"
+
+
+def categorize_latent(
+    latent_id: str,
+    attribution: dict[int, float],
+    contacts: Iterable[int],
+    mut_site: int,
+    motif_spans: dict[str, Iterable[int]],
+    seq_local_window: int = 5,
+) -> LatentRole:
+    """Assign attribution mass using the plan's deterministic H.3 priority order."""
+    if not attribution or any(value < 0 for value in attribution.values()):
+        raise ValueError("attribution must contain non-negative values")
+    total = sum(attribution.values())
+    if total <= 0:
+        return LatentRole(latent_id, "unresolved_diffuse", {c: 0.0 for c in CATEGORIES}, [], 1.0, "categorize_latent")
+    contact_set = set(contacts)
+    motif_set = {residue for span in motif_spans.values() for residue in span}
+    masses = {category: 0.0 for category in CATEGORIES}
+    by_category: dict[str, list[int]] = {category: [] for category in CATEGORIES}
+    for residue, value in attribution.items():
+        category = _category(mut_site, residue, contact_set, motif_set, seq_local_window)
+        masses[category] += value / total
+        by_category[category].append(residue)
+    entropy = -sum(mass * math.log(mass) for mass in masses.values() if mass > 0)
+    diffuseness = entropy / math.log(len(CATEGORIES)) if len(CATEGORIES) > 1 else 0.0
+    category = max(CATEGORIES[:-1], key=lambda item: masses[item])
+    if diffuseness >= 0.82:
+        category = "unresolved_diffuse"
+    supporting = sorted(by_category.get(category, []))
+    return LatentRole(latent_id, category, {k: round(v, 4) for k, v in masses.items()}, supporting, round(diffuseness, 4), "categorize_latent")
+
+
+def mock_latents(mut_site: int) -> list[dict[str, Any]]:
+    """Return three interpretable attributions representing a tiny circuit."""
     return [
-        LocalTool(
-            name="get_latent_evidence",
-            description=(
-                "Return one SAE latent's strongest sequence windows, with brackets "
-                "around each peak, plus their UniProt accessions and activation "
-                "statistics. Call this before annotating a latent. It is the source "
-                "of activation data, and its accessions are inputs to the database "
-                "tools."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "latent_id": {
-                        "type": "string",
-                        "description": "Latent identifier, e.g. 'L-1042'.",
-                    }
-                },
-                "required": ["latent_id"],
-            },
-            handler=get_evidence,
-        ),
-        LocalTool(
-            name="list_latents",
-            description="List every latent id that has evidence available in this run.",
-            input_schema={"type": "object", "properties": {}},
-            handler=list_latents,
-        ),
+        {"latent_id": "L-contact-01", "attribution": {mut_site: 0.2, 22: 0.6, 48: 0.2}},
+        {"latent_id": "L-local-02", "attribution": {mut_site - 2: 0.5, mut_site: 0.3, mut_site + 2: 0.2}},
+        {"latent_id": "L-motif-03", "attribution": {30: 0.7, 31: 0.2, 48: 0.1}},
     ]
-
-
-def load_tooluniverse(tool_names: Sequence[str]):
-    """Load ToolUniverse and verify the tools selected for this run.
-
-    The lazy import lets the evidence and schema modules load without
-    ToolUniverse.
-    """
-    from tooluniverse import ToolUniverse
-
-    tu = ToolUniverse()
-    tu.load_tools()
-    missing = [name for name in tool_names if name not in tu.all_tool_dict]
-    if missing:
-        raise ValueError(f"tools not found in ToolUniverse: {missing}")
-    return tu

@@ -4,16 +4,4 @@ version = "0.1.0"
 description = "Tool-grounded annotation of SAE latents from protein language models"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = [
-    "tooluniverse",
-    "huggingface-hub>=1.0",
-    "python-dotenv>=1.0",
-    "jsonschema>=4.0",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["latent_annotation"]
+dependencies = ["tooluniverse"]

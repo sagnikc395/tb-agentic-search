@@ -10,23 +10,33 @@ an observation that would falsify the label.
 
 ## Run it
 
+This repository currently contains a **minimal viable, offline prototype** of the
+Stage 0 loop in `PLAN.md`. It is intentionally not installable and does not claim
+biological validity yet: structure, ESM scores, SAE activations, and hypotheses are
+mocked so the orchestration, deterministic annotation, citations, and trace can be
+shown to an advisor before GPU/API work.
+
+Run it directly from the repository root:
+
 ```bash
-uv sync
-uv run python examples/annotate_latents.py                        # mock model, offline
-uv run python examples/annotate_latents.py --show-evidence        # no model at all
+python examples/annotate_latents.py --dry-run --mut L7D
+python examples/annotate_latents.py --dry-run --mut L7D --json
 ```
 
-For real annotations, copy `.env.example` to `.env`, set `HF_TOKEN`, and:
+To use the supplied DNAJA1/InterPro data path through ToolUniverse:
 
 ```bash
-uv run python examples/annotate_latents.py --provider huggingface
-uv run python examples/annotate_latents.py --provider huggingface --model Qwen/Qwen3-32B
+python examples/annotate_latents.py --tooluniverse --protein DNAJA1 --mut L7D
 ```
 
-The default model client is `MockChatClient`. It follows the same path as a model:
-fetch evidence, look up the first accession, and return an annotation that matches
-the schema. It needs no model token or model API call. ToolUniverse requests still
-run, so the mock covers the full pipeline except biological interpretation.
+This calls `UniProt_search`, `UniProt_get_sequence_by_accession`,
+`UniProt_get_features_by_accession`, `InterPro_get_protein_domains`, and
+`InterPro_get_residue_annotations` for reviewed human DNAJA1 (`P31689`). It fails loudly on missing ToolUniverse or network/API errors, and records (rather
+than hides) numbering mismatches. For example, the live UniProt sequence reports
+Y7 while the plan’s construct mutation is L7D; that discrepancy is now visible in
+the report and should be resolved before interpreting the mutation biologically.
+The current slice still leaves ESM, SAE activations, and 3D contact computation for
+the next stage; it does not present those as real evidence.
 
 ## Layout
 
