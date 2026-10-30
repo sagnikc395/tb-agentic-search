@@ -1,7 +1,16 @@
 [project]
-name = "latent-annotation"
+name = "tb-agentic-search"
 version = "0.1.0"
-description = "Tool-grounded annotation of SAE latents from protein language models"
+description = "Detect TB-related research documents with a biomni agent on Groq"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["tooluniverse"]
+dependencies = [
+    "biomni>=0.0.8",
+    "fonttools>=4.68.0",
+    "gradio>=5.0,<6.0",
+    "groq>=1.7.0",
+    "langchain-openai>=0.3",
+    "pypdf>=6.21.4",
+    "python-dotenv>=1.2.3",
+    "tooluniverse",
+]
