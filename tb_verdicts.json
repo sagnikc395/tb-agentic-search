@@ -1,0 +1,20 @@
+{
+  "generated_at": "2026-10-30T10:33:59",
+  "model": "Groq/openai/gpt-oss-120b",
+  "mode": "light",
+  "input": "papers",
+  "summary": {
+    "related": 1,
+    "not_related": 0,
+    "unknown": 0
+  },
+  "results": [
+    {
+      "file": "2026.01.30.702134v1.full.pdf",
+      "path": "papers/2026.01.30.702134v1.full.pdf",
+      "tb_related": true,
+      "confidence": "high",
+      "reason": "Focuses on M. tuberculosis genomes and antibiotic resistance benchmark"
+    }
+  ]
+}

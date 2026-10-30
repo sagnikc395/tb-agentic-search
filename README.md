@@ -38,6 +38,24 @@ uv run cli.py --agent                      # full A1 agent loop instead (needs T
 # Retrieval: let the A1 agent find related papers from a query / seed URL
 uv run cli.py --search "find me relevant papers like this paper https://www.biorxiv.org/content/..."
 uv run cli.py --search "..." --max-papers 20 -o found.json
+uv run cli.py --search "..." --verbose            # plus biomni's raw agent steps
+```
+
+A search run echoes each lookup the agent makes as it goes, then lists the
+papers it settled on:
+
+```
+Searching for up to 5 paper(s) [agent, Groq openai/gpt-oss-120b]
+  query: find me relevant papers like this paper https://...
+
+  [2] extract_url_content(https://...)
+  [3] query_pubmed(Mycobacterium tuberculosis drug resistance prediction)
+  [4] agent wrote up its answer
+
+Papers related to the query (3):
+   1. WGS prediction of MTB resistance (2021) [pubmed]
+      https://pubmed.ncbi.nlm.nih.gov/...
+      Same question with a larger cohort.
 ```
 
 ## Flags
@@ -56,6 +74,7 @@ uv run cli.py --search "..." --max-papers 20 -o found.json
 | `--data-lake` | `[--agent]` Let biomni pull its full data lake (tens of GB) |
 | `--timeout` | `[--agent]` Per-execution timeout in seconds |
 | `--temperature` | Sampling temperature (default 0.2) |
+| `--verbose` | `[--search]` Also print biomni's full step-by-step agent output |
 | `--scan-only` | List docs and preview excerpts; no LLM call |
 
 ## Layout

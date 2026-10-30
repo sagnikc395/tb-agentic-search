@@ -47,6 +47,16 @@ def write_results(
     )
 
 
+def paper_line(row: dict) -> str:
+    """One console entry for a found paper: title line plus link and relevance."""
+    year = f" ({row['year']})" if row.get("year") else ""
+    source = f" [{row['source']}]" if row.get("source") else ""
+    tail = "".join(
+        f"\n      {row[key]}" for key in ("link", "relevance") if row.get(key)
+    )
+    return f"{row['title']}{year}{source}{tail}"
+
+
 def write_papers(rows: list[dict], settings: Settings, query: str, output: Path) -> None:
     """JSON for a --search run: the found papers plus what was asked."""
     payload = {
@@ -57,4 +67,8 @@ def write_papers(rows: list[dict], settings: Settings, query: str, output: Path)
         "papers": rows,
     }
     output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"Found {len(rows)} paper(s) → saved to {output}")
+
+    print(f"\nPapers related to the query ({len(rows)}):" if rows else "\nNo papers found.")
+    for number, row in enumerate(rows, start=1):
+        print(f"  {number:>2}. {paper_line(row)}")
+    print(f"\nSaved to {output}")

@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, help="Sampling temperature.")
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="[--search] Also print biomni's full step-by-step agent output.",
+    )
+    parser.add_argument(
         "--scan-only",
         action="store_true",
         help="List docs and preview excerpts; no LLM call.",
@@ -117,10 +122,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if mode == "search":
-        print(f"Searching [agent, {settings.source} {settings.model}]\n")
+        max_papers = max(1, args.max_papers)
+        print(
+            f"Searching for up to {max_papers} paper(s) "
+            f"[agent, {settings.source} {settings.model}]\n"
+            f"  query: {args.search}\n"
+        )
         try:
             check_connection(settings)
-            rows = retrieve_papers(build_agent(settings), args.search)
+            rows = retrieve_papers(
+                build_agent(settings), args.search, max_papers, args.verbose
+            )
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 1
