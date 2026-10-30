@@ -31,7 +31,9 @@ def check_connection(settings: Settings) -> None:
             max_tokens=1,
         )
     except Exception as e:
-        raise ConfigError(f"Groq rejected the request for model {settings.model!r}: {e}") from e
+        raise ConfigError(
+            f"Groq rejected the request for model {settings.model!r}: {e}"
+        ) from e
 
 
 def build_screener(settings: Settings):
@@ -45,7 +47,9 @@ def build_screener(settings: Settings):
 
     default_config.temperature = settings.temperature
     os.environ["GROQ_API_KEY"] = settings.api_key
-    return get_llm(model=settings.model, source=settings.source, temperature=settings.temperature)
+    return get_llm(
+        model=settings.model, source=settings.source, temperature=settings.temperature
+    )
 
 
 def build_agent(settings: Settings):
@@ -78,7 +82,7 @@ def build_agent(settings: Settings):
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     text = str(exc).lower()
-    return "413" in text or "rate limit" in text or "tpm" in text or "tokens per minute" in text
+    return any(tag in text for tag in ("413", "rate limit", "tpm", "tokens per minute"))
 
 
 def _wait_out_rate_limit(action, *args):
@@ -89,7 +93,10 @@ def _wait_out_rate_limit(action, *args):
         except Exception as e:
             if not _is_rate_limit_error(e) or attempt == 2:
                 raise
-            print(f"    rate limited; waiting {RATE_LIMIT_WAIT_SECONDS}s and retrying", flush=True)
+            print(
+                f"    rate limited; waiting {RATE_LIMIT_WAIT_SECONDS}s and retrying",
+                flush=True,
+            )
             time.sleep(RATE_LIMIT_WAIT_SECONDS)
 
 
@@ -102,8 +109,23 @@ def classify_one(screener, name: str, excerpt: str, strict: bool) -> dict | None
         prompt += "\n\nREMINDER: reply with ONLY the JSON object, no other text."
     reply = screener.invoke(prompt)
     content = getattr(reply, "content", reply)
-    text = content if isinstance(content, str) else "".join(str(block) for block in content or [])
+    text = (
+        content
+        if isinstance(content, str)
+        else "".join(str(block) for block in content or [])
+    )
     return parse_verdict_object(text)
+
+
+def _row(path: Path, verdict: dict, fallback_reason: str) -> dict:
+    """The one result-row shape written to JSON and the summary line."""
+    return {
+        "file": path.name,
+        "path": str(path),
+        "tb_related": as_bool(verdict.get("tb_related")),
+        "confidence": as_confidence(verdict.get("confidence")),
+        "reason": str(verdict.get("reason", "")).strip() or fallback_reason,
+    }
 
 
 def classify_documents_light(screener, docs: list[Path], max_chars: int) -> list[dict]:
@@ -115,27 +137,30 @@ def classify_documents_light(screener, docs: list[Path], max_chars: int) -> list
         verdict: dict = {}
         for strict in (False, True):  # second pass only asks for stricter JSON
             try:
-                verdict = _wait_out_rate_limit(classify_one, screener, path.name, excerpt, strict) or {}
+                verdict = (
+                    _wait_out_rate_limit(
+                        classify_one, screener, path.name, excerpt, strict
+                    )
+                    or {}
+                )
             except Exception as e:  # noqa: BLE001 - one unparsable doc must not stop the rest
                 print(f"    ! screening call failed: {e}")
                 break
             if verdict:
                 break
 
-        row = {
-            "file": path.name,
-            "path": str(path),
-            "tb_related": as_bool(verdict.get("tb_related")),
-            "confidence": as_confidence(verdict.get("confidence")),
-            "reason": str(verdict.get("reason", "")).strip()
-            or ("no parseable verdict returned" if not verdict else "reason missing"),
-        }
+        row = _row(
+            path, verdict,
+            "no parseable verdict returned" if not verdict else "reason missing",
+        )
         rows.append(row)
         print(f"    {verdict_line(row)}", flush=True)
     return rows
 
 
-def classify_documents_agent(agent, docs: list[Path], batch_size: int, max_chars: int) -> list[dict]:
+def classify_documents_agent(
+    agent, docs: list[Path], batch_size: int, max_chars: int
+) -> list[dict]:
     """Ask the full A1 agent to judge the docs in batches; one row per doc."""
     rows: list[dict] = []
     batches = [docs[i : i + batch_size] for i in range(0, len(docs), batch_size)]
@@ -150,15 +175,22 @@ def classify_documents_agent(agent, docs: list[Path], batch_size: int, max_chars
         try:
             _log, answer = agent.go(prompt)
         except Exception as e:  # noqa: BLE001 - a failed batch must not stop the run
-            print(f"  ! agent call {batch_number}/{len(batches)} failed, marking batch unknown: {e}")
+            print(
+                f"  ! agent call {batch_number}/{len(batches)} failed, marking batch unknown: {e}"
+            )
             if _is_rate_limit_error(e):
-                print("    hint: A1's system prompt is huge; try --batch-size 1, or drop --agent")
+                print(
+                    "    hint: A1's system prompt is huge; try --batch-size 1, or drop --agent"
+                )
             answer = ""
 
         verdicts = parse_verdict_list(answer or "", len(batch))
         if len(verdicts) < len(batch):  # one retry, with a sterner reminder
             try:
-                _log, answer = agent.go(prompt + "\n\nREMINDER: reply with ONLY the JSON list, no other text.")
+                _log, answer = agent.go(
+                    prompt
+                    + "\n\nREMINDER: reply with ONLY the JSON list, no other text."
+                )
                 verdicts = parse_verdict_list(answer or "", len(batch))
             except Exception as e:  # noqa: BLE001 - leave unparsed docs as unknown
                 print(f"  ! retry failed, leaving unparsed docs as unknown: {e}")
@@ -166,16 +198,10 @@ def classify_documents_agent(agent, docs: list[Path], batch_size: int, max_chars
         print(f"Batch {batch_number}/{len(batches)}:")
         for index, path in enumerate(batch):
             verdict = verdicts.get(index, {})
-            reason = str(verdict.get("reason", "")).strip()
-            if not verdicts:
-                reason = "agent verdict could not be parsed"
-            row = {
-                "file": path.name,
-                "path": str(path),
-                "tb_related": as_bool(verdict.get("tb_related")),
-                "confidence": as_confidence(verdict.get("confidence")),
-                "reason": reason,
-            }
+            row = _row(
+                path, verdict,
+                "agent verdict could not be parsed" if not verdicts else "",
+            )
             rows.append(row)
             print(f"  {verdict_line(row)}")
         print()

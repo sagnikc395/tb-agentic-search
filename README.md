@@ -1,5 +1,7 @@
 # tb-agentic-search
 
+![flow](./assets/v1.png)
+
 Screen a folder of research documents (PDF or plain text) for tuberculosis /
 *Mycobacterium tuberculosis* relevance, with an LLM wired through
 [Biomni](https://github.com/snap-stanford/Biomni)'s Groq plumbing.
@@ -23,14 +25,12 @@ cp .env.example .env   # then fill in GROQ_API_KEY
 ## Usage
 
 ```bash
-tb-search                              # screens ./papers, or ../papers when ./papers is absent
-tb-search ../papers                    # any directory or single PDF/text file
-tb-search --scan-only                  # list docs and preview excerpts, no API call
-tb-search -o out.json                  # default output: tb_verdicts.json
-tb-search --agent                      # full A1 agent loop instead (needs TPM)
+uv run cli.py                               # screens ./papers, or ../papers when ./papers is absent
+uv run cli.py ../papers                    # any directory or single PDF/text file
+uv run cli.py --scan-only                  # list docs and preview excerpts, no API call
+uv run cli.py -o out.json                  # default output: tb_verdicts.json
+uv run cli.py --agent                      # full A1 agent loop instead (needs TPM)
 ```
-
-`python main.py` is the same thing — `main.py` just calls `tb_search.cli.main`.
 
 ## Flags
 
@@ -51,7 +51,6 @@ tb-search --agent                      # full A1 agent loop instead (needs TPM)
 ## Layout
 
 ```
-main.py            shim → tb_search.cli (keeps the original command working)
 tb_search/
   cli.py           CLI entry point; also installed as the `tb-search` script
   config.py        Settings loaded from .env / environment
@@ -64,39 +63,3 @@ tests/             pytest suite for the parsing and extraction logic
 ```
 
 Run the tests with `uv run pytest`, lint with `uv run ruff check .`.
-
-## Dependencies
-
-The list is exactly what the code (and biomni's used paths) import: `biomni`,
-`groq`, `langchain-openai` (biomni's Groq backend), `pypdf`, `python-dotenv`,
-`tooluniverse` (biomni's agent tools).
-
-`gradio` and `fonttools` used to be declared and are gone — nothing in this repo
-or in biomni's screening paths imports them. The only loss: biomni's built-in
-`launch_gradio_demo()` demo UI now raises its own ImportError if you ever call it.
-
-## How code is written here
-
-House style, borrowed from the lazy-senior-dev school
-([ponytail](https://github.com/DietrichGebert/ponytail)): the smallest change
-that fully works, and nothing a busy human can't read in one pass.
-
-- Read what a change touches before writing it: the callers, tests and fixtures
-  it would break. Fix the root cause once in the shared code, not at every
-  call site.
-- Check what already exists before adding anything: a helper in this repo,
-  then the standard library, then an installed dependency. A new dependency
-  only when it clearly saves more lines than it costs.
-- No abstraction, wrapper, option, or "for later" code nobody asked for.
-  Deletion beats addition.
-- Comments say only what the code cannot show, one line each. A comment that
-  restates the code is wrong; delete the comment. A deliberate shortcut gets
-  `shortcut: <limit>, <when to upgrade>` so it can be found later.
-- Docstrings on modules and non-obvious functions; one line when that's enough.
-- Non-trivial logic (parsers, normalization, filtering) ships with a small test
-  in `tests/`. Trivial changes need none.
-- Prose — this README, docstrings, commit messages — is direct and
-  imperative: "Run X", not "It is recommended to run X". No emoji, no section
-  banners, no filler.
-- Never cut: validation at trust boundaries, error handling that prevents
-  data loss, tests.

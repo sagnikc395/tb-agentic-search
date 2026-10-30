@@ -52,7 +52,12 @@ def parse_verdict_object(answer: str) -> dict | None:
     for data in _load_json(answer or ""):
         if isinstance(data, dict) and "tb_related" in data:
             return data
-        if isinstance(data, list) and data and isinstance(data[0], dict) and "tb_related" in data[0]:
+        if (
+            isinstance(data, list)
+            and data
+            and isinstance(data[0], dict)
+            and "tb_related" in data[0]
+        ):
             return data[0]  # the model answered in list form anyway
     return None
 

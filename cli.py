@@ -26,24 +26,58 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tb-search",
         description="Detect TB-related research documents with a biomni-powered LLM on Groq.",
     )
-    parser.add_argument("input", nargs="?", help="Directory or file to screen. Defaults to ./papers, "
-                                                 "or ../papers when ./papers does not exist.")
-    parser.add_argument("-o", "--output", default="tb_verdicts.json", help="Where to write the JSON verdicts.")
-    parser.add_argument("--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL}).")
-    parser.add_argument("--agent", action="store_true",
-                        help="Use the full biomni A1 agent loop instead of small per-doc LLM calls. "
-                             "A1's system prompt is large; a free Groq account will be rate limited.")
-    parser.add_argument("--batch-size", type=int, default=2,
-                        help="[--agent] Documents per agent call (default: 2).")
-    parser.add_argument("--max-chars", type=int, default=EXCERPT_CHARS, help="Excerpt length per document.")
-    parser.add_argument("--tools", action="store_true",
-                        help="[--agent] Let the A1 agent retrieve a relevant tool subset.")
-    parser.add_argument("--data-lake", action="store_true",
-                        help="[--agent] Let biomni download its full data lake (tens of GB).")
-    parser.add_argument("--timeout", type=int,
-                        help="[--agent] Per-execution timeout in seconds.")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        help="Directory or file to screen. Defaults to ./papers, "
+        "or ../papers when ./papers does not exist.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="tb_verdicts.json",
+        help="Where to write the JSON verdicts.",
+    )
+    parser.add_argument(
+        "--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL})."
+    )
+    parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="Use the full biomni A1 agent loop instead of small per-doc LLM calls. "
+        "A1's system prompt is large; a free Groq account will be rate limited.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=2,
+        help="[--agent] Documents per agent call (default: 2).",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=EXCERPT_CHARS,
+        help="Excerpt length per document.",
+    )
+    parser.add_argument(
+        "--tools",
+        action="store_true",
+        help="[--agent] Let the A1 agent retrieve a relevant tool subset.",
+    )
+    parser.add_argument(
+        "--data-lake",
+        action="store_true",
+        help="[--agent] Let biomni download its full data lake (tens of GB).",
+    )
+    parser.add_argument(
+        "--timeout", type=int, help="[--agent] Per-execution timeout in seconds."
+    )
     parser.add_argument("--temperature", type=float, help="Sampling temperature.")
-    parser.add_argument("--scan-only", action="store_true", help="List docs and preview excerpts; no LLM call.")
+    parser.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="List docs and preview excerpts; no LLM call.",
+    )
     return parser
 
 
@@ -56,8 +90,8 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             temperature=args.temperature,
             timeout_seconds=args.timeout,
-            use_tool_retriever=True if args.tools else None,
-            load_data_lake=True if args.data_lake else None,
+            use_tool_retriever=args.tools or None,
+            load_data_lake=args.data_lake or None,
         )
     except ConfigError as e:
         print(e, file=sys.stderr)
@@ -65,17 +99,25 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = resolve_input(args.input)
     if input_path is None:
-        print(f"Input not found: {args.input!r}" if args.input
-              else "No papers directory found; pass one, e.g. `tb-search ../papers`", file=sys.stderr)
+        print(
+            f"Input not found: {args.input!r}"
+            if args.input
+            else "No papers directory found; pass one, e.g. `tb-search ../papers`",
+            file=sys.stderr,
+        )
         return 1
 
     docs = collect_docs(input_path)
     if not docs:
-        print(f"No .pdf/.txt/.md/... documents found under {input_path}", file=sys.stderr)
+        print(
+            f"No .pdf/.txt/.md/... documents found under {input_path}", file=sys.stderr
+        )
         return 1
 
-    print(f"Screening {len(docs)} document(s) under {input_path} "
-          f"[mode: {mode}, {settings.source} {settings.model}]\n")
+    print(
+        f"Screening {len(docs)} document(s) under {input_path} "
+        f"[mode: {mode}, {settings.source} {settings.model}]\n"
+    )
 
     if args.scan_only:
         for path in docs:
@@ -91,7 +133,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if mode == "agent":
         agent = build_agent(settings)
-        rows = classify_documents_agent(agent, docs, max(1, args.batch_size), max(200, args.max_chars))
+        rows = classify_documents_agent(
+            agent, docs, max(1, args.batch_size), max(200, args.max_chars)
+        )
     else:
         screener = build_screener(settings)
         rows = classify_documents_light(screener, docs, max(200, args.max_chars))
@@ -99,5 +143,6 @@ def main(argv: list[str] | None = None) -> int:
     write_results(rows, settings, input_path, Path(args.output), mode)
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

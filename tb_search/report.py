@@ -15,10 +15,14 @@ def verdict_line(row: dict) -> str:
     else:
         verdict = "??"
     confidence = f" ('{row['confidence']}')" if row["confidence"] else ""
-    return f"[{verdict}] {row['file']}{confidence} — {row['reason'] or 'no reason given'}"
+    return (
+        f"[{verdict}] {row['file']}{confidence} — {row['reason'] or 'no reason given'}"
+    )
 
 
-def write_results(rows: list[dict], settings: Settings, input_path: Path, output: Path, mode: str) -> None:
+def write_results(
+    rows: list[dict], settings: Settings, input_path: Path, output: Path, mode: str
+) -> None:
     counts = {"related": 0, "not_related": 0, "unknown": 0}
     for row in rows:
         if row["tb_related"] is True:
@@ -37,5 +41,7 @@ def write_results(rows: list[dict], settings: Settings, input_path: Path, output
         "results": rows,
     }
     output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"Verdicts: {counts['related']} TB-related, {counts['not_related']} not, "
-          f"{counts['unknown']} unknown → saved to {output}")
+    print(
+        f"Verdicts: {counts['related']} TB-related, {counts['not_related']} not, "
+        f"{counts['unknown']} unknown → saved to {output}"
+    )

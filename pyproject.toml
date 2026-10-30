@@ -12,16 +12,3 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "tooluniverse",
 ]
-
-[project.scripts]
-tb-search = "tb_search.cli:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["tb_search"]
-
-[dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.9"]
