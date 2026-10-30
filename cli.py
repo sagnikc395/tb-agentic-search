@@ -1,8 +1,11 @@
 """Screen research documents for tuberculosis relevance with a Groq-backed LLM.
 
-Two modes: light (default) makes one small LLM call per document, sized for a
-free Groq account; --agent runs the full Biomni A1 agent tool loop, which needs
-a Groq tier with a bigger tokens-per-minute budget.
+Two screening modes: light (default) makes one small LLM call per document,
+sized for a free Groq account; --agent runs the full Biomni A1 agent tool loop,
+which needs a Groq tier with a bigger tokens-per-minute budget.
+
+Separately, --search runs the A1 agent on a retrieval request — often one naming
+a seed paper by URL or DOI — and saves the related papers it finds.
 """
 
 import argparse
@@ -11,7 +14,8 @@ from pathlib import Path
 
 from tb_search.config import DEFAULT_MODEL, ConfigError, load_settings
 from tb_search.documents import EXCERPT_CHARS, collect_docs, extract_text, resolve_input
-from tb_search.report import write_results
+from tb_search.report import write_papers, write_results
+from tb_search.retrieval import retrieve_papers
 from tb_search.screening import (
     build_agent,
     build_screener,
@@ -33,10 +37,24 @@ def build_parser() -> argparse.ArgumentParser:
         "or ../papers when ./papers does not exist.",
     )
     parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="Retrieval request for the A1 agent — typically a sentence naming a "
+        "seed paper by URL or DOI, e.g. 'find me relevant papers like this paper "
+        "<url>'. Output defaults to tb_papers.json.",
+    )
+    parser.add_argument(
         "-o",
         "--output",
-        default="tb_verdicts.json",
-        help="Where to write the JSON verdicts.",
+        default=None,
+        help="Where to write the JSON output (default: tb_verdicts.json, "
+        "or tb_papers.json with --search).",
+    )
+    parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=10,
+        help="[--search] Cap on papers the agent should return (default: 10).",
     )
     parser.add_argument(
         "--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL})."
@@ -83,7 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    mode = "agent" if args.agent else "light"
+    mode = "search" if args.search else ("agent" if args.agent else "light")
+    output = Path(args.output or ("tb_papers.json" if mode == "search" else "tb_verdicts.json"))
 
     try:
         settings = load_settings(
@@ -96,6 +115,17 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(e, file=sys.stderr)
         return 1
+
+    if mode == "search":
+        print(f"Searching [agent, {settings.source} {settings.model}]\n")
+        try:
+            check_connection(settings)
+            rows = retrieve_papers(build_agent(settings), args.search)
+        except ConfigError as e:
+            print(e, file=sys.stderr)
+            return 1
+        write_papers(rows, settings, args.search, output)
+        return 0
 
     input_path = resolve_input(args.input)
     if input_path is None:
@@ -140,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         screener = build_screener(settings)
         rows = classify_documents_light(screener, docs, max(200, args.max_chars))
 
-    write_results(rows, settings, input_path, Path(args.output), mode)
+    write_results(rows, settings, input_path, output, mode)
     return 0
 
 

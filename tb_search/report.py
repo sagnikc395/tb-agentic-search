@@ -1,4 +1,4 @@
-"""Console summary line and the JSON results file."""
+"""Console summary line and the JSON results files."""
 
 import json
 from datetime import datetime
@@ -45,3 +45,16 @@ def write_results(
         f"Verdicts: {counts['related']} TB-related, {counts['not_related']} not, "
         f"{counts['unknown']} unknown → saved to {output}"
     )
+
+
+def write_papers(rows: list[dict], settings: Settings, query: str, output: Path) -> None:
+    """JSON for a --search run: the found papers plus what was asked."""
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "model": f"{settings.source}/{settings.model}",
+        "mode": "search",
+        "query": query,
+        "papers": rows,
+    }
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"Found {len(rows)} paper(s) → saved to {output}")

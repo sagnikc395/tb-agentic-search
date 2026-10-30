@@ -1,4 +1,4 @@
-"""Salvage a verdict out of an LLM reply, whatever shape it came back in."""
+"""Salvage verdicts and paper lists out of an LLM reply, whatever shape it came back in."""
 
 import json
 import re
@@ -60,6 +60,53 @@ def parse_verdict_object(answer: str) -> dict | None:
         ):
             return data[0]  # the model answered in list form anyway
     return None
+
+
+def parse_paper_list(answer: str) -> list[dict]:
+    """Pull paper rows out of an agent reply, prose and all; [] when nothing fits."""
+    for found in _load_json(answer or ""):
+        if isinstance(found, dict):
+            candidates = []
+            for key in ("papers", "results", "data"):
+                if isinstance(found.get(key), list):
+                    candidates = [found[key]]
+                    break
+            else:
+                candidates = [found]
+        else:
+            candidates = [found]
+
+        if not isinstance(candidates[0], list):
+            continue
+
+        rows = []
+        for obj in candidates[0]:
+            if not isinstance(obj, dict):
+                continue
+            # A row may wrap its papers under a key (e.g. {"papers": [...]})
+            for key in ("papers", "results", "data"):
+                if isinstance(obj.get(key), list):
+                    rows.extend(
+                        item for item in obj[key] if isinstance(item, dict) and item.get("title")
+                    )
+                    break
+            if any(isinstance(obj.get(key), list) for key in ("papers", "results", "data")):
+                continue
+            title = str(obj.get("title", "")).strip()
+            if not title:  # a paperless row is noise
+                continue
+            link = obj.get("link") or obj.get("url") or obj.get("doi") or ""
+            rows.append(
+                {
+                    "title": title,
+                    "year": str(obj.get("year", "")).strip(),
+                    "link": str(link).strip(),
+                    "source": str(obj.get("source", "")).strip(),
+                    "relevance": str(obj.get("relevance", "")).strip(),
+                }
+            )
+        return rows
+    return []
 
 
 def parse_verdict_list(answer: str, count: int) -> dict[int, dict]:
