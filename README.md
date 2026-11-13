@@ -5,22 +5,20 @@
 ![flow-3](./assets/v2-3.png)
 ![relevance_check](./assets/paper_relevance_check.png)
 
-Two capabilities, with the LLM calls going through
+Two capabilities, with every LLM call going through
 [Biomni](https://github.com/snap-stanford/Biomni)'s Groq plumbing:
 
-- **Retrieval** (`--search`) — give it a request such as "find me relevant
-  papers like this paper <paper-url>". It resolves the seed paper on Europe
-  PMC, Semantic Scholar or Crossref, gathers candidates from the seed's references, its citing papers and
-  keyword searches, ranks them, and has the LLM score the best ones. Papers it
-  accepts seed the next round. Every returned paper is an API record, so none
-  can be invented. `--no-llm` runs it without a model; `--agent` uses the
-  Biomni A1 agent instead.
+- **Retrieval** (`--search`) — give it a request such as "find me relevant papers
+  like this paper <paper-url>". It resolves the seed paper on Europe PMC,
+  Semantic Scholar or Crossref, gathers candidates from the seed's references,
+  the papers citing it and keyword searches, and has the LLM score them. Papers
+  it accepts seed the next round, and every returned paper is an API record, so
+  none can be invented. `--agent` swaps the small per-paper calls for the
+  Biomni A1 agent.
 - **Screening** — hand it a folder of documents (PDF or plain text) and it
   returns an assessment per document: `tb_related`, a 0–3 `relevance`, paper
   type, drugs, genes/variants, methods, datasets, and an `evidence` quote that
   is checked against the text (`evidence_verified`).
-
-The design and the papers behind it are in [LIT_REVIEW.md](./LIT_REVIEW.md).
 
 Screening has two modes:
 
@@ -36,32 +34,43 @@ uv sync
 cp .env.example .env   # then fill in GROQ_API_KEY
 ```
 
+Every mode calls Groq, so `GROQ_API_KEY` is required; there is no offline mode.
 `SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional: both sources
 answer without them, only slower (`CROSSREF_MAILTO` is just an email address and
 puts requests in Crossref's faster "polite" pool).
 
 ## Usage
 
+**Screening local documents**
+
 ```bash
-uv run cli.py                               # screens ./papers, or ../papers when ./papers is absent
-uv run cli.py ../papers                    # any directory or single PDF/text file
-uv run cli.py -o out.json                  # default output: tb_verdicts.json
-uv run cli.py --agent                      # full A1 agent loop instead (needs TPM)
-
+uv run cli.py                        # screens ./papers, or ../papers when ./papers is absent
+uv run cli.py ../papers               # any directory or single PDF/text file
+uv run cli.py -o out.json             # default output: tb_verdicts.json
+uv run cli.py --agent                 # full A1 agent loop instead (needs TPM)
 uv run cli.py --gold eval/screening_gold.json   # plus accuracy against hand labels
+```
 
-# Retrieval: find related papers from a query / seed URL
+**Retrieval**
+
+```bash
 uv run cli.py --search "find me relevant papers like this paper https://www.biorxiv.org/content/..."
-uv run cli.py --search "..." -n 20 -o found.json      # at most the 20 most relevant
-uv run cli.py --search "..." --sources europepmc      # one literature source only
-uv run cli.py --search "..." --sources semanticscholar,crossref   # merge just these two
-uv run cli.py --search "..." --rounds 3 --budget 10   # more rounds, fewer LLM calls per round
-uv run cli.py --search "..." --no-llm                 # text-overlap ranking, no API key
-uv run cli.py --search "..." --agent --verbose        # the Biomni A1 agent instead
+uv run cli.py --search "..." -n 20 -o found.json        # at most 20 papers, most relevant first
+uv run cli.py --search "..." --sources europepmc        # one literature source only
+uv run cli.py --search "..." --sources semanticscholar,crossref
+uv run cli.py --search "..." --rounds 3 --budget 10     # more rounds, fewer LLM calls per round
+uv run cli.py --search "..." --agent --verbose          # the Biomni A1 agent instead
+```
 
-# Evaluation: hide the seed's reference list and see how much of it is found
-uv run cli.py --eval-retrieval "https://www.biorxiv.org/content/..." --no-llm
-uv run cli.py --eval-retrieval "https://..." --sources europepmc --no-llm   # score one source
+Candidates are ranked by structure, not by text: a paper reached by several
+routes (both reference lists and a keyword search, say) is scored before one a
+single search turned up. The LLM then gives it the 0–3 relevance.
+
+**Evaluation**
+
+```bash
+uv run cli.py --eval-retrieval "https://www.biorxiv.org/content/..."
+uv run cli.py --eval-retrieval "https://..." --sources europepmc   # score one source
 ```
 
 A search run echoes each lookup as it goes (the round number in brackets),
@@ -83,9 +92,6 @@ Papers related to the query (8):
       Provides a TB drug resistance benchmark similar to BIG-TB.
 ```
 
-Runs accumulate in `tb_search.db` (SQLite): papers, cached assessments, and a
-step-by-step trace of every run.
-
 ## Flags
 
 | flag | meaning |
@@ -97,8 +103,6 @@ step-by-step trace of every run.
 | `--sources` | `[--search]`, `[--eval-retrieval]` Literature sources to query and merge, comma-separated, from `europepmc`, `semanticscholar`, `crossref` (default all three) |
 | `--rounds` | `[--search]` Discovery rounds (default 2) |
 | `--budget` | `[--search]` Papers the LLM assesses per round (default 20) |
-| `--no-llm` | `[--search]` Rank by text overlap only; needs no API key |
-| `--db` | `[--search]` SQLite file for papers, assessments and traces (default `tb_search.db`) |
 | `--gold JSON` | `[screening]` Hand labels `{filename: true/false}`; prints accuracy |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
 | `--model` | Groq model id (default: `$GROQ_MODEL` or `openai/gpt-oss-120b`) |
@@ -120,13 +124,11 @@ tb_search/
   prompts.py       the assessment, query-writing and agent prompts
   verdicts.py      salvage JSON out of whatever the model returned
   sources.py       Europe PMC, Semantic Scholar, Crossref: seed lookup, references, citations, search
-  discovery.py     the discovery loop: expand, rank, assess, repeat
+  discovery.py     the discovery loop: expand, assess, repeat
   assess.py        structured assessment of a paper or local document
-  store.py         SQLite: papers, cached assessments, run traces
   evaluate.py      retrieval recall and screening accuracy
   screening.py     LLM/agent construction and agent-mode screening
   retrieval.py     one A1 agent run: query (+ seed paper URL) -> paper rows
   report.py        summary line + JSON output (verdicts and search runs)
 eval/              hand labels for screening
 ```
-

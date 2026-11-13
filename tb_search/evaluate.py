@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 
 from tb_search.discovery import DiscoveryConfig, discover
-from tb_search.store import Store
 
 TB_TITLE = re.compile(r"tubercul|mycobacter|\bM?TB\b", re.IGNORECASE)
 CUTOFFS = (10, 25, 50, 100)
@@ -26,10 +25,8 @@ def recall_at(
 
 def evaluate_retrieval(
     source,
-    store: Store,
     seed_query: str,
     llm=None,
-    model: str = "",
     config: DiscoveryConfig | None = None,
     log=print,
 ) -> dict | None:
@@ -51,7 +48,7 @@ def evaluate_retrieval(
 
     config = config or DiscoveryConfig()
     config.use_seed_references = False
-    run = discover(source, store, seed_query, llm, model, config, log)
+    run = discover(source, seed_query, llm, config, log)
     ranked = [candidate.paper.key for candidate in run.ranked()]
 
     return {

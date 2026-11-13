@@ -58,7 +58,7 @@ def paper_line(row: dict) -> str:
 
 
 def discovered_rows(candidates) -> list[dict]:
-    """Discovery candidates as paper rows: the --search shape plus score and facets."""
+    """Discovery candidates as paper rows: the --search shape plus routes and assessment."""
     rows = []
     for candidate in candidates:
         paper, assessment = candidate.paper, candidate.assessment or {}
@@ -70,7 +70,6 @@ def discovered_rows(candidates) -> list[dict]:
                 "source": paper.source,
                 "relevance": assessment.get("reason", ""),
                 "relevance_score": candidate.relevance,
-                "lexical_score": candidate.score,
                 "routes": candidate.routes,
                 "assessment": assessment or None,
             }

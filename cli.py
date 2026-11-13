@@ -28,7 +28,6 @@ from tb_search.screening import (
     classify_documents_agent,
 )
 from tb_search.sources import SOURCE_NAMES, build_source
-from tb_search.store import Store
 
 
 def fail(message: str) -> int:
@@ -73,17 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="[--search] Papers the LLM assesses per round (default: 20).",
-    )
-    parser.add_argument(
-        "--no-llm",
-        action="store_true",
-        help="[--search] Rank by text overlap only; needs no API key.",
-    )
-    parser.add_argument(
-        "--db",
-        default="tb_search.db",
-        help="[--search] SQLite file that accumulates papers, assessments and "
-        "run traces (default: tb_search.db).",
     )
     parser.add_argument(
         "--gold",
@@ -154,16 +142,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_discovery(args, output: Path | None) -> int:
-    """--search and --eval-retrieval: the discovery loop, with or without an LLM."""
+    """--search and --eval-retrieval: the discovery loop."""
     request = args.search or args.eval_retrieval
-    llm, model = None, "none (lexical ranking)"
-    if not args.no_llm:
-        try:
-            settings = load_settings(model=args.model, temperature=args.temperature)
-            check_connection(settings)
-        except ConfigError as e:
-            return fail(f"{e}\n(--no-llm runs the search without a model)")
-        llm, model = build_screener(settings), f"{settings.source}/{settings.model}"
+    try:
+        settings = load_settings(model=args.model, temperature=args.temperature)
+        check_connection(settings)
+    except ConfigError as e:
+        return fail(e)
+    llm, model = build_screener(settings), f"{settings.source}/{settings.model}"
 
     config = DiscoveryConfig(
         rounds=max(1, args.rounds),
@@ -177,37 +163,31 @@ def run_discovery(args, output: Path | None) -> int:
     except ValueError as e:
         return fail(e)
     print(f"Searching [{config.rounds} round(s), {model}]\n  query: {request}\n")
-    store = Store(args.db)
-    try:
-        if args.eval_retrieval:
-            report = evaluate_retrieval(source, store, request, llm, model, config)
-            if report is None:
-                print(
-                    "Seed paper not found, or it has no matched references.",
-                    file=sys.stderr,
-                )
-                return 1
-            output = output or Path("eval_retrieval.json")
-            output.write_text(
-                json.dumps({"model": model, **report}, indent=2, ensure_ascii=False)
-            )
+    if args.eval_retrieval:
+        report = evaluate_retrieval(source, request, llm, config)
+        if report is None:
             print(
-                f"\nGold: {report['gold']['all']} references, {report['gold']['tb']} about TB"
+                "Seed paper not found, or it has no matched references.",
+                file=sys.stderr,
             )
-            for name, scores in report["recall"].items():
-                line = "  ".join(
-                    f"{cutoff} {value}" for cutoff, value in scores.items()
-                )
-                print(f"  recall ({name}): {line}")
-            print(f"Saved to {output}")
-            return 0
-
-        run = discover(source, store, request, llm, model, config)
-        rows = discovered_rows(run.papers(config.max_papers, config.accept))
-        write_papers(rows, model, request, output or Path("tb_papers.json"))
+            return 1
+        output = output or Path("eval_retrieval.json")
+        output.write_text(
+            json.dumps({"model": model, **report}, indent=2, ensure_ascii=False)
+        )
+        print(
+            f"\nGold: {report['gold']['all']} references, {report['gold']['tb']} about TB"
+        )
+        for name, scores in report["recall"].items():
+            line = "  ".join(f"{cutoff} {value}" for cutoff, value in scores.items())
+            print(f"  recall ({name}): {line}")
+        print(f"Saved to {output}")
         return 0
-    finally:
-        store.close()
+
+    run = discover(source, request, llm, config)
+    rows = discovered_rows(run.papers(config.max_papers, config.accept))
+    write_papers(rows, model, request, output or Path("tb_papers.json"))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
