@@ -70,7 +70,9 @@ def assess(llm, name: str, text: str, topic: str = DEFAULT_TOPIC) -> dict | None
     """Assess one text against the topic; None when no reply could be parsed."""
     # .format would eat the JSON braces inside the prompt example; plain replace.
     prompt = (
-        ASSESS_PROMPT.replace("{TOPIC}", topic).replace("{name}", name).replace("{DOC}", text)
+        ASSESS_PROMPT.replace("{TOPIC}", topic)
+        .replace("{name}", name)
+        .replace("{DOC}", text)
     )
     for strict in (False, True):  # second pass only asks for stricter JSON
         if strict:
@@ -99,8 +101,13 @@ def assess_documents(llm, docs: list[Path], max_chars: int) -> list[dict]:
             "path": str(path),
             "tb_related": assessment["tb_central"] if assessment else None,
             "confidence": None,
-            "reason": (assessment or {}).get("reason") or "no parseable verdict returned",
-            **{k: v for k, v in (assessment or {}).items() if k not in ("tb_central", "reason")},
+            "reason": (assessment or {}).get("reason")
+            or "no parseable verdict returned",
+            **{
+                k: v
+                for k, v in (assessment or {}).items()
+                if k not in ("tb_central", "reason")
+            },
         }
         rows.append(row)
         print(f"    {verdict_line(row)}", flush=True)

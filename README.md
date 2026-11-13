@@ -8,7 +8,7 @@ Two capabilities, with the LLM calls going through
 
 - **Retrieval** (`--search`) — give it a request such as "find me relevant
   papers like this paper <paper-url>". It resolves the seed paper on Europe
-  PMC, gathers candidates from the seed's references, its citing papers and
+  PMC, Semantic Scholar or Crossref, gathers candidates from the seed's references, its citing papers and
   keyword searches, ranks them, and has the LLM score the best ones. Papers it
   accepts seed the next round. Every returned paper is an API record, so none
   can be invented. `--no-llm` runs it without a model; `--agent` uses the
@@ -34,12 +34,15 @@ uv sync
 cp .env.example .env   # then fill in GROQ_API_KEY
 ```
 
+`SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional: both sources
+answer without them, only slower (`CROSSREF_MAILTO` is just an email address and
+puts requests in Crossref's faster "polite" pool).
+
 ## Usage
 
 ```bash
 uv run cli.py                               # screens ./papers, or ../papers when ./papers is absent
 uv run cli.py ../papers                    # any directory or single PDF/text file
-uv run cli.py --scan-only                  # list docs and preview excerpts, no API call
 uv run cli.py -o out.json                  # default output: tb_verdicts.json
 uv run cli.py --agent                      # full A1 agent loop instead (needs TPM)
 
@@ -47,13 +50,16 @@ uv run cli.py --gold eval/screening_gold.json   # plus accuracy against hand lab
 
 # Retrieval: find related papers from a query / seed URL
 uv run cli.py --search "find me relevant papers like this paper https://www.biorxiv.org/content/..."
-uv run cli.py --search "..." --max-papers 20 -o found.json
+uv run cli.py --search "..." -n 20 -o found.json      # at most the 20 most relevant
+uv run cli.py --search "..." --sources europepmc      # one literature source only
+uv run cli.py --search "..." --sources semanticscholar,crossref   # merge just these two
 uv run cli.py --search "..." --rounds 3 --budget 10   # more rounds, fewer LLM calls per round
 uv run cli.py --search "..." --no-llm                 # text-overlap ranking, no API key
 uv run cli.py --search "..." --agent --verbose        # the Biomni A1 agent instead
 
 # Evaluation: hide the seed's reference list and see how much of it is found
 uv run cli.py --eval-retrieval "https://www.biorxiv.org/content/..." --no-llm
+uv run cli.py --eval-retrieval "https://..." --sources europepmc --no-llm   # score one source
 ```
 
 A search run echoes each lookup as it goes (the round number in brackets),
@@ -85,7 +91,8 @@ step-by-step trace of every run.
 | `input` (optional) | Directory or file to screen; defaults to `./papers`, else `../papers` |
 | `--search QUERY` | Retrieval request; typically names a seed paper by URL/DOI. Output: `tb_papers.json` |
 | `--eval-retrieval SEED` | Recall of SEED's held-out reference list. Output: `eval_retrieval.json` |
-| `--max-papers` | `[--search]` Cap on papers returned (default 10) |
+| `-n`, `--top` | `[--search]` Upper bound on papers returned, most relevant first (default 10) |
+| `--sources` | `[--search]`, `[--eval-retrieval]` Literature sources to query and merge, comma-separated, from `europepmc`, `semanticscholar`, `crossref` (default all three) |
 | `--rounds` | `[--search]` Discovery rounds (default 2) |
 | `--budget` | `[--search]` Papers the LLM assesses per round (default 20) |
 | `--no-llm` | `[--search]` Rank by text overlap only; needs no API key |
@@ -98,10 +105,8 @@ step-by-step trace of every run.
 | `--max-chars` | Excerpt length per document (default 3000) |
 | `--tools` | `[--agent]` Let the agent retrieve a relevant tool subset |
 | `--data-lake` | `[--agent]` Let biomni pull its full data lake (tens of GB) |
-| `--timeout` | `[--agent]` Per-execution timeout in seconds |
 | `--temperature` | Sampling temperature (default 0.2) |
 | `--verbose` | `[--search --agent]` Also print biomni's full step-by-step agent output |
-| `--scan-only` | List docs and preview excerpts; no LLM call |
 
 ## Layout
 
@@ -112,7 +117,7 @@ tb_search/
   documents.py     collect files, extract text and section-aware excerpts
   prompts.py       the assessment, query-writing and agent prompts
   verdicts.py      salvage JSON out of whatever the model returned
-  sources.py       Europe PMC: seed lookup, references, citations, search
+  sources.py       Europe PMC, Semantic Scholar, Crossref: seed lookup, references, citations, search
   discovery.py     the discovery loop: expand, rank, assess, repeat
   assess.py        structured assessment of a paper or local document
   store.py         SQLite: papers, cached assessments, run traces

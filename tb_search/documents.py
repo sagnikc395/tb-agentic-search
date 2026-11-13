@@ -64,8 +64,12 @@ def extract_text(path: Path, max_chars: int = EXCERPT_CHARS) -> str:
 
 # Section headings as they survive whitespace-collapsing: a capitalised heading
 # word followed by the capital that starts the section's first sentence.
-METHODS_HEADING = re.compile(r"\b(?:Materials and Methods|Methods|Methodology|METHODS)\s+(?=[A-Z])")
-CLOSING_HEADING = re.compile(r"\b(?:Conclusions?|Discussion|CONCLUSIONS?|DISCUSSION)\s+(?=[A-Z])")
+METHODS_HEADING = re.compile(
+    r"\b(?:Materials and Methods|Methods|Methodology|METHODS)\s+(?=[A-Z])"
+)
+CLOSING_HEADING = re.compile(
+    r"\b(?:Conclusions?|Discussion|CONCLUSIONS?|DISCUSSION)\s+(?=[A-Z])"
+)
 
 
 def section_excerpt(text: str, max_chars: int = EXCERPT_CHARS) -> str:
@@ -83,11 +87,12 @@ def section_excerpt(text: str, max_chars: int = EXCERPT_CHARS) -> str:
     methods = METHODS_HEADING.search(text, head_end)
     if methods:
         parts.append(text[methods.start() : methods.start() + share])
-    closing = None
-    for closing in CLOSING_HEADING.finditer(text, methods.end() if methods else head_end):
-        pass  # keep the last: the real section, not an in-text mention
-    if closing:
-        parts.append(text[closing.start() : closing.start() + share])
+    closings = list(
+        CLOSING_HEADING.finditer(text, methods.end() if methods else head_end)
+    )
+    if closings:  # the last: the real section, not an in-text mention
+        start = closings[-1].start()
+        parts.append(text[start : start + share])
 
     head = text[: max_chars - share * len(parts)]
     return " [...] ".join([head, *parts])

@@ -17,7 +17,7 @@ from pathlib import Path
 from tb_search.assess import assess_documents
 from tb_search.config import DEFAULT_MODEL, ConfigError, load_settings
 from tb_search.discovery import DiscoveryConfig, discover
-from tb_search.documents import EXCERPT_CHARS, collect_docs, extract_text, resolve_input
+from tb_search.documents import EXCERPT_CHARS, collect_docs, resolve_input
 from tb_search.evaluate import evaluate_retrieval, evaluate_screening
 from tb_search.report import discovered_rows, write_papers, write_results
 from tb_search.retrieval import retrieve_papers
@@ -27,8 +27,14 @@ from tb_search.screening import (
     check_connection,
     classify_documents_agent,
 )
-from tb_search.sources import EuropePMC
+from tb_search.sources import SOURCE_NAMES, build_source
 from tb_search.store import Store
+
+
+def fail(message: str) -> int:
+    """Report an error on stderr and return the CLI's exit code."""
+    print(message, file=sys.stderr)
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,10 +99,19 @@ def build_parser() -> argparse.ArgumentParser:
         "or tb_papers.json with --search).",
     )
     parser.add_argument(
-        "--max-papers",
+        "-n",
+        "--top",
+        dest="max_papers",
         type=int,
         default=10,
-        help="[--search] Cap on papers the agent should return (default: 10).",
+        help="[--search] Upper bound on papers returned, most relevant first "
+        "(default: 10). Fewer come back when fewer are judged relevant.",
+    )
+    parser.add_argument(
+        "--sources",
+        default=",".join(SOURCE_NAMES),
+        help="[--search] Comma-separated literature sources to query and merge "
+        f"(default: {','.join(SOURCE_NAMES)}).",
     )
     parser.add_argument(
         "--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL})."
@@ -129,19 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="[--agent] Let biomni download its full data lake (tens of GB).",
     )
-    parser.add_argument(
-        "--timeout", type=int, help="[--agent] Per-execution timeout in seconds."
-    )
     parser.add_argument("--temperature", type=float, help="Sampling temperature.")
     parser.add_argument(
         "--verbose",
         action="store_true",
         help="[--search --agent] Also print biomni's full step-by-step agent output.",
-    )
-    parser.add_argument(
-        "--scan-only",
-        action="store_true",
-        help="List docs and preview excerpts; no LLM call.",
     )
     return parser
 
@@ -155,8 +162,7 @@ def run_discovery(args, output: Path | None) -> int:
             settings = load_settings(model=args.model, temperature=args.temperature)
             check_connection(settings)
         except ConfigError as e:
-            print(f"{e}\n(--no-llm runs the search without a model)", file=sys.stderr)
-            return 1
+            return fail(f"{e}\n(--no-llm runs the search without a model)")
         llm, model = build_screener(settings), f"{settings.source}/{settings.model}"
 
     config = DiscoveryConfig(
@@ -164,19 +170,34 @@ def run_discovery(args, output: Path | None) -> int:
         budget=max(1, args.budget),
         max_papers=max(1, args.max_papers),
     )
+    try:
+        source = build_source(
+            [name.strip() for name in args.sources.split(",") if name.strip()]
+        )
+    except ValueError as e:
+        return fail(e)
     print(f"Searching [{config.rounds} round(s), {model}]\n  query: {request}\n")
-    source, store = EuropePMC(), Store(args.db)
+    store = Store(args.db)
     try:
         if args.eval_retrieval:
             report = evaluate_retrieval(source, store, request, llm, model, config)
             if report is None:
-                print("Seed paper not found, or it has no matched references.", file=sys.stderr)
+                print(
+                    "Seed paper not found, or it has no matched references.",
+                    file=sys.stderr,
+                )
                 return 1
             output = output or Path("eval_retrieval.json")
-            output.write_text(json.dumps({"model": model, **report}, indent=2, ensure_ascii=False))
-            print(f"\nGold: {report['gold']['all']} references, {report['gold']['tb']} about TB")
+            output.write_text(
+                json.dumps({"model": model, **report}, indent=2, ensure_ascii=False)
+            )
+            print(
+                f"\nGold: {report['gold']['all']} references, {report['gold']['tb']} about TB"
+            )
             for name, scores in report["recall"].items():
-                line = "  ".join(f"{cutoff} {value}" for cutoff, value in scores.items())
+                line = "  ".join(
+                    f"{cutoff} {value}" for cutoff, value in scores.items()
+                )
                 print(f"  recall ({name}): {line}")
             print(f"Saved to {output}")
             return 0
@@ -195,19 +216,19 @@ def main(argv: list[str] | None = None) -> int:
         return run_discovery(args, Path(args.output) if args.output else None)
 
     mode = "search" if args.search else ("agent" if args.agent else "light")
-    output = Path(args.output or ("tb_papers.json" if mode == "search" else "tb_verdicts.json"))
+    output = Path(
+        args.output or ("tb_papers.json" if mode == "search" else "tb_verdicts.json")
+    )
 
     try:
         settings = load_settings(
             model=args.model,
             temperature=args.temperature,
-            timeout_seconds=args.timeout,
             use_tool_retriever=args.tools or None,
             load_data_lake=args.data_lake or None,
         )
     except ConfigError as e:
-        print(e, file=sys.stderr)
-        return 1
+        return fail(e)
 
     if mode == "search":
         max_papers = max(1, args.max_papers)
@@ -222,8 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 build_agent(settings), args.search, max_papers, args.verbose
             )
         except ConfigError as e:
-            print(e, file=sys.stderr)
-            return 1
+            return fail(e)
         write_papers(rows, f"{settings.source}/{settings.model}", args.search, output)
         return 0
 
@@ -249,17 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         f"[mode: {mode}, {settings.source} {settings.model}]\n"
     )
 
-    if args.scan_only:
-        for path in docs:
-            preview = extract_text(path, 200) or "(no text)"
-            print(f"  {path.name} — {preview}...")
-        return 0
-
     try:
         check_connection(settings)
     except ConfigError as e:
-        print(e, file=sys.stderr)
-        return 1
+        return fail(e)
 
     if mode == "agent":
         agent = build_agent(settings)

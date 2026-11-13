@@ -30,6 +30,14 @@ def _searches(output: str) -> list[str]:
     return lines
 
 
+def _next_step(steps, quiet: bool):
+    """One agent step, its pretty-printed code swallowed unless quiet is off."""
+    if not quiet:
+        return next(steps)
+    with redirect_stdout(io.StringIO()):
+        return next(steps)
+
+
 def _run_streamed(agent, prompt: str, verbose: bool) -> str:
     """Run the agent step by step, echoing its searches; returns the last message.
 
@@ -43,11 +51,7 @@ def _run_streamed(agent, prompt: str, verbose: bool) -> str:
 
     while True:
         try:
-            if verbose:
-                step = next(steps)
-            else:
-                with redirect_stdout(io.StringIO()):
-                    step = next(steps)
+            step = _next_step(steps, quiet=not verbose)
         except StopIteration:
             break
 

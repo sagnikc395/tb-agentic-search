@@ -38,7 +38,12 @@ class Store:
     def start_run(self, query: str, seed_key: str, config: dict) -> int:
         cursor = self.db.execute(
             "INSERT INTO runs (started, query, seed_key, config) VALUES (?, ?, ?, ?)",
-            (datetime.now().isoformat(timespec="seconds"), query, seed_key, json.dumps(config)),
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                query,
+                seed_key,
+                json.dumps(config),
+            ),
         )
         self.db.commit()
         return cursor.lastrowid
@@ -50,15 +55,22 @@ class Store:
         )
 
     def save_candidate(
-        self, run_id: int, paper_key: str, round_number: int, routes: list[str],
-        score: float, relevance: int | None,
+        self,
+        run_id: int,
+        paper_key: str,
+        round_number: int,
+        routes: list[str],
+        score: float,
+        relevance: int | None,
     ) -> None:
         self.db.execute(
             "INSERT OR REPLACE INTO candidates VALUES (?, ?, ?, ?, ?, ?)",
             (run_id, paper_key, round_number, json.dumps(routes), score, relevance),
         )
 
-    def cached_assessment(self, paper_key: str, topic_key: str, model: str) -> dict | None:
+    def cached_assessment(
+        self, paper_key: str, topic_key: str, model: str
+    ) -> dict | None:
         row = self.db.execute(
             "SELECT assessment FROM assessments WHERE paper_key = ? AND topic_key = ? AND model = ?",
             (paper_key, topic_key, model),
@@ -90,9 +102,13 @@ class Store:
 
     def events(self, run_id: int) -> list[tuple[int, str, dict]]:
         rows = self.db.execute(
-            "SELECT round, kind, detail FROM events WHERE run_id = ? ORDER BY rowid", (run_id,)
+            "SELECT round, kind, detail FROM events WHERE run_id = ? ORDER BY rowid",
+            (run_id,),
         )
-        return [(round_number, kind, json.loads(detail)) for round_number, kind, detail in rows]
+        return [
+            (round_number, kind, json.loads(detail))
+            for round_number, kind, detail in rows
+        ]
 
     def close(self) -> None:
         self.db.commit()

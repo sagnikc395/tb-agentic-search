@@ -67,7 +67,7 @@ def discovered_rows(candidates) -> list[dict]:
                 "title": paper.title,
                 "year": paper.year,
                 "link": paper.link,
-                "source": "europepmc",
+                "source": paper.source,
                 "relevance": assessment.get("reason", ""),
                 "relevance_score": candidate.relevance,
                 "lexical_score": candidate.score,
@@ -89,7 +89,11 @@ def write_papers(rows: list[dict], model: str, query: str, output: Path) -> None
     }
     output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
-    print(f"\nPapers related to the query ({len(rows)}):" if rows else "\nNo papers found.")
+    print(
+        f"\nPapers related to the query ({len(rows)}):"
+        if rows
+        else "\nNo papers found."
+    )
     for number, row in enumerate(rows, start=1):
         print(f"  {number:>2}. {paper_line(row)}")
     print(f"\nSaved to {output}")

@@ -72,7 +72,7 @@ tests/                 18 tests on parsing, discovery, evaluation
    or stops early if under 15% of a round is accepted or nothing new turns up.
 7. **Return.** Accepted papers are sorted by relevance then overlap score, a
    preprint and its published version are collapsed to one, and the top
-   `--max-papers` are written to `tb_papers.json`.
+   `-n` papers are written to `tb_papers.json`.
 
 With `--no-llm`, the LLM-written queries and the assessment step are skipped:
 ranking is by word overlap only, and the top five by overlap are expanded.

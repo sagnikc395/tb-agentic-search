@@ -19,16 +19,85 @@ from tb_search.store import Store
 from tb_search.verdicts import parse_string_list
 
 TOKEN = re.compile(r"[a-z][a-z0-9-]{2,}")
-STOPWORDS = frozenset({
-    "the", "and", "for", "with", "from", "that", "this", "these", "those", "are", "was", "were",
-    "been", "has", "have", "had", "not", "but", "can", "may", "will", "its", "their", "our",
-    "into", "than", "then", "also", "using", "used", "use", "based", "via", "between", "among",
-    "across", "within", "over", "under", "more", "most", "such", "both", "each", "other",
-    "which", "while", "where", "when", "how", "what", "who", "paper", "papers", "find",
-    "relevant", "like", "related", "study", "studies", "results", "show", "shows", "new",
-    "novel", "approach", "analysis", "data", "http", "https", "www", "org", "com", "content",
-    "full",
-})
+STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "these",
+        "those",
+        "are",
+        "was",
+        "were",
+        "been",
+        "has",
+        "have",
+        "had",
+        "not",
+        "but",
+        "can",
+        "may",
+        "will",
+        "its",
+        "their",
+        "our",
+        "into",
+        "than",
+        "then",
+        "also",
+        "using",
+        "used",
+        "use",
+        "based",
+        "via",
+        "between",
+        "among",
+        "across",
+        "within",
+        "over",
+        "under",
+        "more",
+        "most",
+        "such",
+        "both",
+        "each",
+        "other",
+        "which",
+        "while",
+        "where",
+        "when",
+        "how",
+        "what",
+        "who",
+        "paper",
+        "papers",
+        "find",
+        "relevant",
+        "like",
+        "related",
+        "study",
+        "studies",
+        "results",
+        "show",
+        "shows",
+        "new",
+        "novel",
+        "approach",
+        "analysis",
+        "data",
+        "http",
+        "https",
+        "www",
+        "org",
+        "com",
+        "content",
+        "full",
+    }
+)
 
 # Every candidate a round turns up gets its abstract fetched before ranking;
 # past this many, only the best by title are worth the requests.
@@ -86,7 +155,9 @@ class Run:
     def papers(self, max_papers: int, accept: int) -> list[Candidate]:
         ranked = self.ranked()
         if self.assessed:
-            ranked = [c for c in ranked if c.relevance is not None and c.relevance >= accept]
+            ranked = [
+                c for c in ranked if c.relevance is not None and c.relevance >= accept
+            ]
         # A preprint and its published version are two records with one title.
         unique: dict[str, Candidate] = {}
         for candidate in ranked:
@@ -111,17 +182,24 @@ def keyword_query(text: str, limit: int = 12) -> str:
 def lexical_scores(topic: str, papers: list[Paper]) -> dict[str, float]:
     """Share of the topic's idf-weighted vocabulary each paper covers, in [0, 1]."""
     wanted = set(tokens(topic))
-    docs = {paper.key: set(tokens(f"{paper.title} {paper.abstract}")) for paper in papers}
+    docs = {
+        paper.key: set(tokens(f"{paper.title} {paper.abstract}")) for paper in papers
+    }
     frequency = Counter(token for doc in docs.values() for token in doc)
 
     def idf(token: str) -> float:
         return math.log((len(docs) + 1) / (frequency[token] + 1)) + 1
 
     total = sum(idf(token) for token in wanted) or 1.0
-    return {key: sum(idf(token) for token in doc & wanted) / total for key, doc in docs.items()}
+    return {
+        key: sum(idf(token) for token in doc & wanted) / total
+        for key, doc in docs.items()
+    }
 
 
-def generate_queries(llm, topic: str, found: list[str], used: list[str], count: int) -> list[str]:
+def generate_queries(
+    llm, topic: str, found: list[str], used: list[str], count: int
+) -> list[str]:
     """Ask the LLM for search queries from new angles; [] when it gives nothing usable."""
     prompt = (
         QUERY_PROMPT.replace("{TOPIC}", topic)
@@ -170,14 +248,20 @@ def discover(
     run = Run(seed=seed, topic=topic, assessed=llm is not None)
     run_id = store.start_run(query, seed.key if seed else "", asdict(config))
     topic_key = _topic_key(seed, query)
-    store.event(run_id, 0, "seed", {"key": seed.key if seed else None, "title": topic[:200]})
+    store.event(
+        run_id, 0, "seed", {"key": seed.key if seed else None, "title": topic[:200]}
+    )
 
     frontier = [seed] if seed else []
     queries = [keyword_query(seed.title if seed else query)]
     if llm:
-        queries += generate_queries(llm, topic[:1500], [], queries, config.queries_per_round)
+        queries += generate_queries(
+            llm, topic[:1500], [], queries, config.queries_per_round
+        )
 
-    def lookup(action, argument, route: str, kind: str, fresh: dict, round_number: int) -> None:
+    def lookup(
+        action, argument, route: str, kind: str, fresh: dict, round_number: int
+    ) -> None:
         """One source call; its papers join this round's fresh candidates."""
         try:
             papers = action(argument)
@@ -205,10 +289,21 @@ def discover(
         for paper in frontier:
             if paper is not seed or config.use_seed_references:
                 lookup(
-                    source.references, paper, f"cited-by:{paper.key}", "expand",
-                    fresh, round_number,
+                    source.references,
+                    paper,
+                    f"cited-by:{paper.key}",
+                    "expand",
+                    fresh,
+                    round_number,
                 )
-            lookup(source.citations, paper, f"cites:{paper.key}", "expand", fresh, round_number)
+            lookup(
+                source.citations,
+                paper,
+                f"cites:{paper.key}",
+                "expand",
+                fresh,
+                round_number,
+            )
         for text in queries:
             run.queries.append(text)
             lookup(search, text, f"search:{text}", "search", fresh, round_number)
@@ -252,7 +347,9 @@ def discover(
                 mark = "?" if candidate.relevance is None else candidate.relevance
                 log(f"  [{round_number}] [{mark}] {paper.title[:90]}")
             accepted = [
-                c for c in shortlist if c.relevance is not None and c.relevance >= config.accept
+                c
+                for c in shortlist
+                if c.relevance is not None and c.relevance >= config.accept
             ]
         else:
             accepted = shortlist[: config.expand]
@@ -260,13 +357,23 @@ def discover(
         for candidate in pool:
             store.save_paper(candidate.paper)
             store.save_candidate(
-                run_id, candidate.paper.key, round_number, candidate.routes,
-                candidate.score, candidate.relevance,
+                run_id,
+                candidate.paper.key,
+                round_number,
+                candidate.routes,
+                candidate.score,
+                candidate.relevance,
             )
         share = len(accepted) / len(shortlist)
         store.event(
-            run_id, round_number, "round",
-            {"candidates": len(pool), "judged": len(shortlist), "accepted": len(accepted)},
+            run_id,
+            round_number,
+            "round",
+            {
+                "candidates": len(pool),
+                "judged": len(shortlist),
+                "accepted": len(accepted),
+            },
         )
         log(
             f"  [{round_number}] {len(pool)} new candidates, "
@@ -274,16 +381,23 @@ def discover(
         )
 
         if llm and share < config.min_yield:
-            store.event(run_id, round_number, "stop", {"reason": "yield below threshold"})
-            log(f"  [{round_number}] yield {share:.0%} is under {config.min_yield:.0%}; stopping")
+            store.event(
+                run_id, round_number, "stop", {"reason": "yield below threshold"}
+            )
+            log(
+                f"  [{round_number}] yield {share:.0%} is under {config.min_yield:.0%}; stopping"
+            )
             break
 
         frontier = [c.paper for c in accepted[: config.expand]]
         queries = []
         if llm and round_number < config.rounds:
             queries = generate_queries(
-                llm, topic[:1500], [c.paper.title for c in accepted[:8]],
-                run.queries, config.queries_per_round,
+                llm,
+                topic[:1500],
+                [c.paper.title for c in accepted[:8]],
+                run.queries,
+                config.queries_per_round,
             )
 
     return run

@@ -151,7 +151,8 @@ def classify_documents_agent(
         for index, path in enumerate(batch):
             verdict = verdicts.get(index, {})
             row = _row(
-                path, verdict,
+                path,
+                verdict,
                 "agent verdict could not be parsed" if not verdicts else "",
             )
             rows.append(row)

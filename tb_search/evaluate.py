@@ -11,18 +11,27 @@ TB_TITLE = re.compile(r"tubercul|mycobacter|\bM?TB\b", re.IGNORECASE)
 CUTOFFS = (10, 25, 50, 100)
 
 
-def recall_at(ranked: list[str], gold: set[str], cutoffs=CUTOFFS) -> dict[str, float | None]:
+def recall_at(
+    ranked: list[str], gold: set[str], cutoffs=CUTOFFS
+) -> dict[str, float | None]:
     """recall@k per cutoff, plus "pool": recall over everything retrieved."""
     if not gold:
         return {**{f"@{k}": None for k in cutoffs}, "pool": None}
-    scores = {f"@{k}": round(len(gold & set(ranked[:k])) / len(gold), 3) for k in cutoffs}
+    scores = {
+        f"@{k}": round(len(gold & set(ranked[:k])) / len(gold), 3) for k in cutoffs
+    }
     scores["pool"] = round(len(gold & set(ranked)) / len(gold), 3)
     return scores
 
 
 def evaluate_retrieval(
-    source, store: Store, seed_query: str, llm=None, model: str = "",
-    config: DiscoveryConfig | None = None, log=print,
+    source,
+    store: Store,
+    seed_query: str,
+    llm=None,
+    model: str = "",
+    config: DiscoveryConfig | None = None,
+    log=print,
 ) -> dict | None:
     """Hide the seed's reference list, run discovery, and count how much of it comes back.
 
@@ -51,7 +60,8 @@ def evaluate_retrieval(
         "retrieved": len(ranked),
         "recall": {"all": recall_at(ranked, gold), "tb": recall_at(ranked, tb_gold)},
         "missed_tb": sorted(
-            paper.title for paper in references
+            paper.title
+            for paper in references
             if paper.key in tb_gold and paper.key not in set(ranked)
         ),
         "queries": run.queries,
@@ -63,7 +73,8 @@ def evaluate_screening(rows: list[dict], gold_path: Path) -> dict:
     gold = json.loads(gold_path.read_text())
     judged = [row for row in rows if row["file"] in gold]
     wrong = [
-        row["file"] for row in judged
+        row["file"]
+        for row in judged
         if row["tb_related"] is not None and row["tb_related"] != gold[row["file"]]
     ]
     abstained = [row["file"] for row in judged if row["tb_related"] is None]
