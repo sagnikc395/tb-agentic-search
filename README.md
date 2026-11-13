@@ -1,6 +1,7 @@
 # tb-agentic-search
 
-![flow](./assets/v1.png)
+![flow](./assets/v2.png)
+![relevance_check](./assets/paper_relevance_check.png)
 
 Two capabilities, with the LLM calls going through
 [Biomni](https://github.com/snap-stanford/Biomni)'s Groq plumbing:
@@ -120,7 +121,5 @@ tb_search/
   retrieval.py     one A1 agent run: query (+ seed paper URL) -> paper rows
   report.py        summary line + JSON output (verdicts and search runs)
 eval/              hand labels for screening
-tests/             pytest suite for parsing, discovery and evaluation
 ```
 
-Run the tests with `uv run pytest`, lint with `uv run ruff check .`.

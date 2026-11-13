@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-13T13:19:25",
+  "generated_at": "2026-11-13T13:39:04",
   "model": "Groq/openai/gpt-oss-120b",
   "mode": "light",
   "input": "papers",
@@ -14,16 +14,20 @@
       "path": "papers/2026.01.16.696667v3.full.pdf",
       "tb_related": false,
       "confidence": null,
-      "reason": "Paper discusses cancer immunotherapy, no TB relevance",
+      "reason": "Document discusses cancer immunotherapy, no TB relevance",
       "relevance": 0,
       "abstain": false,
       "paper_type": "method",
-      "organism": "[]",
-      "evidence": "Conclusion The overall immune profile suggests a dysfunctional tumor microenvironment dominated by exhausted T cells, which may limit the effectiveness of PD-L1 inhibition despite the favorable TMB.",
+      "organism": "Mycobacterium tuberculosis",
+      "evidence": "The overall immune profile suggests a dysfunctional tumor microenvironment ... which may limit the effectiveness of PD-L1 inhibition despite the favorable TMB.",
       "evidence_verified": false,
-      "drugs": [],
+      "drugs": [
+        "atezolizumab"
+      ],
       "genes_variants": [],
-      "methods": [],
+      "methods": [
+        "AI agent"
+      ],
       "datasets": []
     },
     {
@@ -31,7 +35,7 @@
       "path": "papers/2026.01.30.702134v1.full.pdf",
       "tb_related": true,
       "confidence": null,
-      "reason": "Provides TB resistance benchmark linking genomes to phenotypes and variants.",
+      "reason": "Provides a TB resistance benchmark dataset and ML methods directly relevant to drug resistance genomics.",
       "relevance": 3,
       "abstain": false,
       "paper_type": "benchmark",
@@ -42,8 +46,7 @@
       "genes_variants": [],
       "methods": [
         "CNN",
-        "DNABERT",
-        "foundation models"
+        "DNABERT"
       ],
       "datasets": [
         "BIG-TB"
@@ -54,12 +57,12 @@
       "path": "papers/2026.05.12.724604v1.full.pdf",
       "tb_related": false,
       "confidence": null,
-      "reason": "Paper focuses on LLM benchmarking, no TB content.",
+      "reason": "No TB or M. tuberculosis content",
       "relevance": 0,
       "abstain": false,
       "paper_type": "benchmark",
       "organism": "[]",
-      "evidence": "BiomniBench: Process-level Evaluation of LLM Agents for Real-world Biomedical Research ...",
+      "evidence": "BiomniBench: Process-level Evaluation of LLM Agents for Real-world Biomedical Research",
       "evidence_verified": true,
       "drugs": [],
       "genes_variants": [],
@@ -73,18 +76,17 @@
       "path": "papers/2405.17631v3.pdf",
       "tb_related": false,
       "confidence": null,
-      "reason": "Paper focuses on generic experiment design, not TB.",
+      "reason": "Paper focuses on generic genetic perturbation design, no TB relevance.",
       "relevance": 0,
       "abstain": false,
       "paper_type": "method",
-      "organism": "[]",
-      "evidence": "In this paper, we introduce BioDiscoveryAgent, an agent that designs new experiments, reasons about their outcomes, and efficiently navigates the hypothesis space to reach desired solutions.",
+      "organism": "Mycobacterium tuberculosis",
+      "evidence": "We demonstrate our agent on the problem of designing genetic perturbation experiments, where the aim is to find a small subset out of many possible genes that, when perturbed, result in a specific phenotype.",
       "evidence_verified": false,
       "drugs": [],
       "genes_variants": [],
       "methods": [
-        "large language models",
-        "Bayesian optimization"
+        "large language models"
       ],
       "datasets": []
     },
@@ -93,13 +95,13 @@
       "path": "papers/2606.12736v1.pdf",
       "tb_related": false,
       "confidence": null,
-      "reason": "No TB content; unrelated to topic",
+      "reason": "Document focuses on AI agent benchmarking, not TB research.",
       "relevance": 0,
       "abstain": false,
       "paper_type": "benchmark",
       "organism": "[]",
-      "evidence": "Benchmarking AI Agents for Addressing Scientific Challenges Across Scales",
-      "evidence_verified": true,
+      "evidence": "Benchmarking AI Agents for Addressing Scientific Challenges Across Scales ... AI agents are increasingly being developed to accelerate scientific discovery, yet their practical capabilities in real research settings remain poorly understood.",
+      "evidence_verified": false,
       "drugs": [],
       "genes_variants": [],
       "methods": [],
@@ -110,20 +112,23 @@
       "path": "papers/nihms-2147410.pdf",
       "tb_related": true,
       "confidence": null,
-      "reason": "Directly evaluates AI for interpreting TB resistance mutations",
+      "reason": "Benchmarks AI tools for TB mutation catalogue interpretation.",
       "relevance": 3,
       "abstain": false,
       "paper_type": "benchmark",
       "organism": "Mycobacterium tuberculosis",
-      "evidence": "The World Health Organization (WHO) 2023 Mutation Catalogue for Mycobacterium tuberculosis is a crucial knowledgebase and tool for clinical interpretation of mutations associated with drug‑resistant TB.",
+      "evidence": "The World Health Organization (WHO) 2023 Mutation Catalogue for Mycobacterium tuberculosis is a crucial knowledgebase and tool for clinical interpretation of mutations associated with drug‑ resistant TB.",
       "evidence_verified": true,
       "drugs": [],
       "genes_variants": [],
       "methods": [
-        "generative AI"
+        "Google Gemini 2.5 Pro",
+        "OpenAI ChatGPT 4.1",
+        "Perplexity AI",
+        "DeepSeek R1"
       ],
       "datasets": [
-        "WHO Mutation Catalogue"
+        "WHO 2023 Mutation Catalogue"
       ]
     }
   ]
