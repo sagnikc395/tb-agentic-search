@@ -57,11 +57,32 @@ def paper_line(row: dict) -> str:
     return f"{row['title']}{year}{source}{tail}"
 
 
-def write_papers(rows: list[dict], settings: Settings, query: str, output: Path) -> None:
+def discovered_rows(candidates) -> list[dict]:
+    """Discovery candidates as paper rows: the --search shape plus score and facets."""
+    rows = []
+    for candidate in candidates:
+        paper, assessment = candidate.paper, candidate.assessment or {}
+        rows.append(
+            {
+                "title": paper.title,
+                "year": paper.year,
+                "link": paper.link,
+                "source": "europepmc",
+                "relevance": assessment.get("reason", ""),
+                "relevance_score": candidate.relevance,
+                "lexical_score": candidate.score,
+                "routes": candidate.routes,
+                "assessment": assessment or None,
+            }
+        )
+    return rows
+
+
+def write_papers(rows: list[dict], model: str, query: str, output: Path) -> None:
     """JSON for a --search run: the found papers plus what was asked."""
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model": f"{settings.source}/{settings.model}",
+        "model": model,
         "mode": "search",
         "query": query,
         "papers": rows,

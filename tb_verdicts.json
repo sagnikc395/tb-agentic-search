@@ -1,20 +1,130 @@
 {
-  "generated_at": "2026-10-30T10:33:59",
+  "generated_at": "2026-11-13T13:19:25",
   "model": "Groq/openai/gpt-oss-120b",
   "mode": "light",
   "input": "papers",
   "summary": {
-    "related": 1,
-    "not_related": 0,
+    "related": 2,
+    "not_related": 4,
     "unknown": 0
   },
   "results": [
     {
+      "file": "2026.01.16.696667v3.full.pdf",
+      "path": "papers/2026.01.16.696667v3.full.pdf",
+      "tb_related": false,
+      "confidence": null,
+      "reason": "Paper discusses cancer immunotherapy, no TB relevance",
+      "relevance": 0,
+      "abstain": false,
+      "paper_type": "method",
+      "organism": "[]",
+      "evidence": "Conclusion The overall immune profile suggests a dysfunctional tumor microenvironment dominated by exhausted T cells, which may limit the effectiveness of PD-L1 inhibition despite the favorable TMB.",
+      "evidence_verified": false,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [],
+      "datasets": []
+    },
+    {
       "file": "2026.01.30.702134v1.full.pdf",
       "path": "papers/2026.01.30.702134v1.full.pdf",
       "tb_related": true,
-      "confidence": "high",
-      "reason": "Focuses on M. tuberculosis genomes and antibiotic resistance benchmark"
+      "confidence": null,
+      "reason": "Provides TB resistance benchmark linking genomes to phenotypes and variants.",
+      "relevance": 3,
+      "abstain": false,
+      "paper_type": "benchmark",
+      "organism": "Mycobacterium tuberculosis",
+      "evidence": "We present BIG-TB, a foundation model benchmark for antibiotic resistance prediction and canonical resistance variant discovery in M. tuberculosis.",
+      "evidence_verified": true,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [
+        "CNN",
+        "DNABERT",
+        "foundation models"
+      ],
+      "datasets": [
+        "BIG-TB"
+      ]
+    },
+    {
+      "file": "2026.05.12.724604v1.full.pdf",
+      "path": "papers/2026.05.12.724604v1.full.pdf",
+      "tb_related": false,
+      "confidence": null,
+      "reason": "Paper focuses on LLM benchmarking, no TB content.",
+      "relevance": 0,
+      "abstain": false,
+      "paper_type": "benchmark",
+      "organism": "[]",
+      "evidence": "BiomniBench: Process-level Evaluation of LLM Agents for Real-world Biomedical Research ...",
+      "evidence_verified": true,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [],
+      "datasets": [
+        "BiomniBench-DA"
+      ]
+    },
+    {
+      "file": "2405.17631v3.pdf",
+      "path": "papers/2405.17631v3.pdf",
+      "tb_related": false,
+      "confidence": null,
+      "reason": "Paper focuses on generic experiment design, not TB.",
+      "relevance": 0,
+      "abstain": false,
+      "paper_type": "method",
+      "organism": "[]",
+      "evidence": "In this paper, we introduce BioDiscoveryAgent, an agent that designs new experiments, reasons about their outcomes, and efficiently navigates the hypothesis space to reach desired solutions.",
+      "evidence_verified": false,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [
+        "large language models",
+        "Bayesian optimization"
+      ],
+      "datasets": []
+    },
+    {
+      "file": "2606.12736v1.pdf",
+      "path": "papers/2606.12736v1.pdf",
+      "tb_related": false,
+      "confidence": null,
+      "reason": "No TB content; unrelated to topic",
+      "relevance": 0,
+      "abstain": false,
+      "paper_type": "benchmark",
+      "organism": "[]",
+      "evidence": "Benchmarking AI Agents for Addressing Scientific Challenges Across Scales",
+      "evidence_verified": true,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [],
+      "datasets": []
+    },
+    {
+      "file": "nihms-2147410.pdf",
+      "path": "papers/nihms-2147410.pdf",
+      "tb_related": true,
+      "confidence": null,
+      "reason": "Directly evaluates AI for interpreting TB resistance mutations",
+      "relevance": 3,
+      "abstain": false,
+      "paper_type": "benchmark",
+      "organism": "Mycobacterium tuberculosis",
+      "evidence": "The World Health Organization (WHO) 2023 Mutation Catalogue for Mycobacterium tuberculosis is a crucial knowledgebase and tool for clinical interpretation of mutations associated with drug‑resistant TB.",
+      "evidence_verified": true,
+      "drugs": [],
+      "genes_variants": [],
+      "methods": [
+        "generative AI"
+      ],
+      "datasets": [
+        "WHO Mutation Catalogue"
+      ]
     }
   ]
 }
