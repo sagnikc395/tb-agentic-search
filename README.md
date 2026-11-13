@@ -169,25 +169,6 @@ the default paths avoid A1 entirely. Where a call can still be rejected,
 `_wait_out_rate_limit` retries a 413/TPM error after 65 seconds, and a failure
 is reported per document or per lookup instead of ending the run.
 
-## How it relates to BiomniBench
-
-BiomniBench (Qu et al., bioRxiv 2026) is the
-benchmark that grades biomedical agents against expert rubrics over a whole run
-rather than over its final answer. There is no code dependency here: the
-package is not imported and this repo regenerates none of its tasks. What it
-shaped is how the pipeline is built.
-
-| BiomniBench finding | What this repo does about it |
-| --- | --- |
-| The harness moves scores more than a model generation does | the loop is plain deterministic Python; the model only writes queries and assigns 0–3 relevance, so most of the behaviour is inspectable without a model |
-| Agents were graded over the trace, not the answer | every stage prints its own outcome — lookup counts, per-paper verdicts, retries, the stage that failed — instead of one summary score |
-| Source reliability scored 88–98%, method selection 44–67% | every paper is an API record and every evidence quote is checked against the text, leaving judgement only where a judgement is unavoidable |
-| A final-answer score hides where a run went wrong | retrieval is scored as recall@k against a held-out reference list, screening as accuracy against hand labels, with misses, wrong calls and abstentions listed |
-
-Running BiomniBench itself is a separate exercise; this repo is a TB retrieval
-and screening harness built on the same agent, not an implementation of the
-benchmark.
-
 ## Flags
 
 | flag | meaning |
