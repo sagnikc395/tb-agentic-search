@@ -12,9 +12,10 @@ Two capabilities, with every LLM call going through
   like this paper <paper-url>". It resolves the seed paper on Europe PMC,
   Semantic Scholar or Crossref, gathers candidates from the seed's references,
   the papers citing it and keyword searches, and has the LLM score them. Papers
-  it accepts seed the next round, and every returned paper is an API record, so
-  none can be invented. `--agent` swaps the small per-paper calls for the
-  Biomni A1 agent.
+  it accepts seed the next round, and in this default path every returned paper
+  comes straight from a source API, so none can be invented. `--agent` swaps the
+  small per-paper calls for the Biomni A1 agent, whose own tool calls do the
+  retrieval.
 - **Screening** — hand it a folder of documents (PDF or plain text) and it
   returns an assessment per document: `tb_related`, a 0–3 `relevance`, paper
   type, drugs, genes/variants, methods, datasets, and an `evidence` quote that
@@ -91,6 +92,101 @@ Papers related to the query (8):
       https://doi.org/10.64898/2026.04.08.717138
       Provides a TB drug resistance benchmark similar to BIG-TB.
 ```
+
+## How a run flows
+
+Both modes enter through `cli.py`, which parses flags, loads `Settings` from
+`.env` and picks a path. Everything below the CLI is plain Python. In the
+default paths the model only plans queries and judges text; under `--agent` it
+also drives the retrieval tools and its reply is parsed into rows.
+
+**Screening (the default mode)**
+
+```
+cli.py
+  load_settings          config.py      .env -> Settings
+  resolve_input          documents.py   the directory or single file to read
+  collect_docs           documents.py   every PDF/text under it
+  check_connection       screening.py   one 1-token Groq call, so a bad key fails here
+  build_screener         screening.py   biomni.llm.get_llm -> chat model
+  assess_documents       assess.py      one model call per document
+    section_excerpt      documents.py   opening + methods + conclusion
+    assess               assess.py      ASSESS_PROMPT -> one JSON object
+    parse_assessment     verdicts.py    salvage that JSON from prose or code fences
+    normalize_assessment assess.py      quote checked against the text, facets, abstention
+  write_results          report.py      console lines + tb_verdicts.json
+```
+
+**Retrieval (`--search`, and `--eval-retrieval` which wraps it)**
+
+```
+cli.py run_discovery
+  build_source           sources.py     Europe PMC / Semantic Scholar / Crossref, or Combined
+  discover               discovery.py   repeats --rounds times:
+    source.resolve       sources.py     seed paper from a URL/DOI; with no link, the query is the topic
+    generate_queries     discovery.py   the LLM writes 3 queries, each from a different angle
+    lookup               sources.py     references + citations of the frontier, then every query,
+                                        sent to every selected source and merged by DOI
+    source.hydrate       sources.py     batch-fetch the abstracts
+    rank                 discovery.py   by Candidate.support: routes that reached it, then citations
+    assess               assess.py      the top --budget papers, 0-3 relevance, 2+ accepted
+    next round           discovery.py   the top 5 accepted papers seed the next round
+  discovered_rows        report.py      rows -> tb_papers.json
+```
+
+`--agent` replaces the model step, not the pipeline: screening hands document
+batches to A1, and `--search --agent` runs A1 once and reads the paper list out
+of its reply (`retrieval.py`). `--eval-retrieval` wraps `discover()`: it hides
+the seed's reference list, runs the same loop, and reports recall@10/25/50/100
+against that list (`evaluate.py`).
+
+## How it uses Biomni
+
+Biomni supplies the model and the optional agent; the pipeline around them is
+this repo's, including every prompt (`prompts.py`). The touchpoints are few:
+
+| Biomni piece | Where | Used for |
+| --- | --- | --- |
+| `biomni.llm.get_llm` | `screening.build_screener` | the chat model behind every non-agent call: one prompt per document, and query writing |
+| `biomni.config.default_config` | `build_screener`, `build_agent` | temperature, model and provider; A1 forwards `llm`/`source` but not `temperature` |
+| `biomni.agent.A1` | `screening.build_agent` | the `--agent` path: tool loop, tool retriever, data-lake switch |
+| `agent.go(prompt)` | `screening.classify_documents_agent` | screening in batches of `--batch-size` documents |
+| `agent.go_stream(prompt)` | `retrieval._run_streamed` | search step by step, so its tool calls can be echoed |
+
+Four details are easy to get wrong, which is why the code spells them out:
+
+- `source="Groq"` is always passed explicitly. Biomni's auto-detection sees the
+  slash in `openai/gpt-oss-120b` and would otherwise send the model to Ollama.
+- `GROQ_API_KEY` is copied into the environment before `A1` is built, because
+  Biomni's Groq branch reads it from there, not from our `Settings`.
+- `expected_data_lake_files=[]` (not `None`) is what tells A1 to skip its
+  tens-of-GB data-lake download; `--data-lake` turns it back on.
+- `timeout_seconds` comes from `BIOMNI_TIMEOUT_SECONDS` (default 600) and is
+  passed only to A1.
+
+A1's system prompt is ~35k tokens and Groq's free tier allows 8k per minute, so
+the default paths avoid A1 entirely. Where a call can still be rejected,
+`_wait_out_rate_limit` retries a 413/TPM error after 65 seconds, and a failure
+is reported per document or per lookup instead of ending the run.
+
+## How it relates to BiomniBench
+
+BiomniBench (Qu et al., bioRxiv 2026) is the
+benchmark that grades biomedical agents against expert rubrics over a whole run
+rather than over its final answer. There is no code dependency here: the
+package is not imported and this repo regenerates none of its tasks. What it
+shaped is how the pipeline is built.
+
+| BiomniBench finding | What this repo does about it |
+| --- | --- |
+| The harness moves scores more than a model generation does | the loop is plain deterministic Python; the model only writes queries and assigns 0–3 relevance, so most of the behaviour is inspectable without a model |
+| Agents were graded over the trace, not the answer | every stage prints its own outcome — lookup counts, per-paper verdicts, retries, the stage that failed — instead of one summary score |
+| Source reliability scored 88–98%, method selection 44–67% | every paper is an API record and every evidence quote is checked against the text, leaving judgement only where a judgement is unavoidable |
+| A final-answer score hides where a run went wrong | retrieval is scored as recall@k against a held-out reference list, screening as accuracy against hand labels, with misses, wrong calls and abstentions listed |
+
+Running BiomniBench itself is a separate exercise; this repo is a TB retrieval
+and screening harness built on the same agent, not an implementation of the
+benchmark.
 
 ## Flags
 
