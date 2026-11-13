@@ -1,6 +1,8 @@
 # tb-agentic-search
 
-![flow](./assets/v2.png)
+![flow-1](./assets/v2-1.png)
+![flow-2](./assets/v2-2.png)
+![flow-3](./assets/v2-3.png)
 ![relevance_check](./assets/paper_relevance_check.png)
 
 Two capabilities, with the LLM calls going through
