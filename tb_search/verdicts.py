@@ -47,19 +47,26 @@ def as_confidence(value) -> str | None:
     return None
 
 
-def parse_verdict_object(answer: str) -> dict | None:
-    """Pull a single {"tb_related": ...} verdict out of the reply, prose and all."""
+def parse_assessment(answer: str) -> dict | None:
+    """Pull a single {"relevance": ...} assessment out of the reply, prose and all."""
     for data in _load_json(answer or ""):
-        if isinstance(data, dict) and "tb_related" in data:
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            data = data[0]  # the model answered in list form anyway
+        if isinstance(data, dict) and ("relevance" in data or "abstain" in data):
             return data
-        if (
-            isinstance(data, list)
-            and data
-            and isinstance(data[0], dict)
-            and "tb_related" in data[0]
-        ):
-            return data[0]  # the model answered in list form anyway
     return None
+
+
+def parse_string_list(answer: str) -> list[str]:
+    """Pull a JSON list of strings (search queries) out of the reply; [] when none."""
+    for data in _load_json(answer or ""):
+        if isinstance(data, dict):
+            data = next((value for value in data.values() if isinstance(value, list)), None)
+        if isinstance(data, list):
+            found = [item.strip() for item in data if isinstance(item, str) and item.strip()]
+            if found:
+                return found
+    return []
 
 
 def parse_paper_list(answer: str) -> list[dict]:

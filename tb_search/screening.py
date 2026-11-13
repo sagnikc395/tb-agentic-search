@@ -1,4 +1,4 @@
-"""Build the biomni-backed LLM or agent, and run the two screening modes."""
+"""Build the biomni-backed LLM or agent, and run agent-mode screening."""
 
 import os
 import time
@@ -6,13 +6,12 @@ from pathlib import Path
 
 from tb_search.config import ConfigError, Settings
 from tb_search.documents import extract_text
-from tb_search.prompts import BATCH_SCREEN_PROMPT, SCREEN_DOC_PROMPT
+from tb_search.prompts import BATCH_SCREEN_PROMPT
 from tb_search.report import verdict_line
 from tb_search.verdicts import (
     as_bool,
     as_confidence,
     parse_verdict_list,
-    parse_verdict_object,
 )
 
 # Groq scores requests on a rolling per-minute window, so a TPM rejection
@@ -100,23 +99,6 @@ def _wait_out_rate_limit(action, *args):
             time.sleep(RATE_LIMIT_WAIT_SECONDS)
 
 
-def classify_one(screener, name: str, excerpt: str, strict: bool) -> dict | None:
-    """Screen a single document excerpt; None when the reply isn't parseable."""
-    # .format would eat the JSON braces inside the prompt example; plain replace.
-    body = (excerpt[:200] + "...") if strict else excerpt
-    prompt = SCREEN_DOC_PROMPT.replace("{name}", name).replace("{DOC}", body)
-    if strict:
-        prompt += "\n\nREMINDER: reply with ONLY the JSON object, no other text."
-    reply = screener.invoke(prompt)
-    content = getattr(reply, "content", reply)
-    text = (
-        content
-        if isinstance(content, str)
-        else "".join(str(block) for block in content or [])
-    )
-    return parse_verdict_object(text)
-
-
 def _row(path: Path, verdict: dict, fallback_reason: str) -> dict:
     """The one result-row shape written to JSON and the summary line."""
     return {
@@ -126,36 +108,6 @@ def _row(path: Path, verdict: dict, fallback_reason: str) -> dict:
         "confidence": as_confidence(verdict.get("confidence")),
         "reason": str(verdict.get("reason", "")).strip() or fallback_reason,
     }
-
-
-def classify_documents_light(screener, docs: list[Path], max_chars: int) -> list[dict]:
-    """Screen each document with its own small LLM call; waits out rate limits."""
-    rows: list[dict] = []
-    for number, path in enumerate(docs, start=1):
-        print(f"  {number}/{len(docs)} screening {path.name}...", flush=True)
-        excerpt = extract_text(path, max_chars)
-        verdict: dict = {}
-        for strict in (False, True):  # second pass only asks for stricter JSON
-            try:
-                verdict = (
-                    _wait_out_rate_limit(
-                        classify_one, screener, path.name, excerpt, strict
-                    )
-                    or {}
-                )
-            except Exception as e:  # noqa: BLE001 - one unparsable doc must not stop the rest
-                print(f"    ! screening call failed: {e}")
-                break
-            if verdict:
-                break
-
-        row = _row(
-            path, verdict,
-            "no parseable verdict returned" if not verdict else "reason missing",
-        )
-        rows.append(row)
-        print(f"    {verdict_line(row)}", flush=True)
-    return rows
 
 
 def classify_documents_agent(

@@ -36,8 +36,8 @@ def collect_docs(input_path: Path) -> list[Path]:
     return docs
 
 
-def extract_text(path: Path, max_chars: int = EXCERPT_CHARS) -> str:
-    """First max_chars characters of the document, whitespace-collapsed."""
+def read_text(path: Path) -> str:
+    """The whole document as whitespace-collapsed text."""
     if path.suffix.lower() == ".pdf":
         from pypdf import PdfReader
 
@@ -54,4 +54,40 @@ def extract_text(path: Path, max_chars: int = EXCERPT_CHARS) -> str:
         except Exception as e:  # noqa: BLE001 - unreadable file → screen as unreadable
             return f"(could not read file: {e})"
 
-    return re.sub(r"\s+", " ", text).strip()[:max_chars]
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_text(path: Path, max_chars: int = EXCERPT_CHARS) -> str:
+    """First max_chars characters of the document, whitespace-collapsed."""
+    return read_text(path)[:max_chars]
+
+
+# Section headings as they survive whitespace-collapsing: a capitalised heading
+# word followed by the capital that starts the section's first sentence.
+METHODS_HEADING = re.compile(r"\b(?:Materials and Methods|Methods|Methodology|METHODS)\s+(?=[A-Z])")
+CLOSING_HEADING = re.compile(r"\b(?:Conclusions?|Discussion|CONCLUSIONS?|DISCUSSION)\s+(?=[A-Z])")
+
+
+def section_excerpt(text: str, max_chars: int = EXCERPT_CHARS) -> str:
+    """Opening (title + abstract) plus the starts of the methods and closing sections.
+
+    The opening alone can't tell a TB methods paper from one that names TB in
+    passing. A section that can't be found gives its share back to the opening.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    share = max_chars // 4
+    head_end = max_chars // 2
+    parts = []
+    methods = METHODS_HEADING.search(text, head_end)
+    if methods:
+        parts.append(text[methods.start() : methods.start() + share])
+    closing = None
+    for closing in CLOSING_HEADING.finditer(text, methods.end() if methods else head_end):
+        pass  # keep the last: the real section, not an in-text mention
+    if closing:
+        parts.append(text[closing.start() : closing.start() + share])
+
+    head = text[: max_chars - share * len(parts)]
+    return " [...] ".join([head, *parts])
