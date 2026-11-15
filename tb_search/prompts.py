@@ -109,3 +109,55 @@ REQUEST:
 
 {QUERY}
 """
+
+
+# Used for one isolate / one drug. The variant list is pre-filtered to the
+# drug's panel genes and numbered, so a cited variant can be checked against
+# what was actually in the VCF instead of taken on trust.
+RESISTANCE_PROMPT = """You are a tuberculosis molecular-resistance analyst.
+Given the variants called in one Mycobacterium tuberculosis isolate, predict
+whether it is phenotypically resistant to {DRUG}.
+
+Reason only from the variants listed. Genomic coordinates are H37Rv
+(NC_000962.3). Codon numbers and promoter offsets are already resolved for you.
+
+Genes graded for {DRUG}:
+- tier 1 (established mechanism): {TIER1}
+- tier 2 (secondary): {TIER2}
+
+Reply with exactly one JSON object and nothing else:
+
+{"call": "resistant", "confidence": "high", "variants_cited": [0], "genes_cited": ["rpoB"], "mechanism": "how the variant causes resistance", "reasoning": "step-by-step justification", "unknown_reason": ""}
+
+- call: one of "resistant", "not_resistant", "unknown". Use "unknown" only when
+  the variants genuinely do not settle it — not as a hedge.
+- confidence: one of high, medium, low.
+- variants_cited: the ids of the listed variants your call rests on, as
+  integers. Use [] when no variant supports the call. Never cite an id that is
+  not in the list.
+- genes_cited: the genes your reasoning rests on, named as above.
+- mechanism: how the cited variants change the drug's target or activation,
+  under 40 words. Leave "" when you cite no variant.
+- reasoning: your reasoning, under 120 words. Name the variant, the gene, and
+  why it does or does not confer resistance to {DRUG}. If a known resistance
+  gene carries no variant, say so — an absence is evidence too.
+- unknown_reason: under 25 words, filled in only when call is "unknown".
+
+Weigh the evidence as follows:
+
+- A variant labelled "synonymous" does not change the protein and is not
+  resistance evidence, even in a tier 1 gene and even in a hotspot codon.
+- A truncating variant (frameshift, or a change labelled "nonsense") in a gene
+  whose loss of function causes resistance does count as resistance evidence.
+- "AF" is the fraction of reads carrying the variant. A variant present in only
+  a minority of reads is weak evidence on its own: it may be a subpopulation or
+  a sequencing artefact. Say so, and lower your confidence, rather than reading
+  it as a clear resistant call.
+- A variant in a gene unrelated to {DRUG} is not evidence either way.
+
+ISOLATE {ISOLATE} — variants in the {DRUG} panel genes ({COUNT} found):
+
+---
+{VARIANTS}
+---
+"""
