@@ -96,3 +96,75 @@ def write_papers(rows: list[dict], model: str, query: str, output: Path) -> None
     for number, row in enumerate(rows, start=1):
         print(f"  {number:>2}. {paper_line(row)}")
     print(f"\nSaved to {output}")
+
+
+def write_cohort(cohort, output: Path) -> None:
+    """JSON for a --cohort run: per-drug dataset sizes, and how the join went."""
+    rows = cohort.summary()
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "isolates": len(cohort.isolates),
+        "unmatched_rows": cohort.unmatched_rows,
+        "unmatched_vcfs": cohort.unmatched_vcfs,
+        "drugs": rows,
+    }
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    print(
+        f"{len(cohort.isolates)} isolate(s) with a VCF; "
+        f"{cohort.unmatched_rows} table row(s) had none.\n"
+    )
+    print(f"  {'drug':<26}{'R':>7}{'S':>7}{'total':>8}")
+    for row in rows:
+        print(
+            f"  {row['drug']:<26}{row['resistant']:>7}"
+            f"{row['susceptible']:>7}{row['total']:>8}"
+        )
+    print(f"\nSaved to {output}")
+
+
+def write_predictions(
+    rows: list[dict], scores: dict, model: str, drug: str, output: Path
+) -> None:
+    """JSON for a --predict run: every prediction with its variants and trace, plus scores."""
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "model": model,
+        "mode": "predict",
+        "drug": drug,
+        "scores": scores,
+        "predictions": rows,
+    }
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    confusion, trace = scores["confusion"], scores["trace"]
+    print(f"\n{drug}: {scores['answered']} answered of {scores['n']}", end="")
+    if scores["unknown"]:
+        print(f", {scores['unknown']} unknown", end="")
+    if scores["errors"]:
+        print(f", {scores['errors']} failed", end="")
+    print()
+    mismatched = sum(row.get("ref_mismatches") or 0 for row in rows)
+    if mismatched:
+        print(
+            f"  ! {mismatched} record(s) had a REF that disagrees with H37Rv — "
+            "check the VCFs were called against NC_000962.3"
+        )
+    print(
+        f"  accuracy {scores['accuracy']}  sensitivity {scores['sensitivity']}  "
+        f"specificity {scores['specificity']}  ppv {scores['ppv']}  npv {scores['npv']}"
+    )
+    print(
+        f"  confusion: R->R {confusion['true_resistant_called_resistant']}  "
+        f"R->S {confusion['true_resistant_called_susceptible']}  "
+        f"S->R {confusion['true_susceptible_called_resistant']}  "
+        f"S->S {confusion['true_susceptible_called_susceptible']}"
+    )
+    print(
+        f"  traces: {trace['valid']} valid of {trace['graded']} graded  "
+        f"(hallucinated variants {trace['hallucinated_variants']}, "
+        f"off-panel genes {trace['off_panel_genes']}, "
+        f"ungrounded R calls {trace['ungrounded_resistant_calls']}, "
+        f"tier-1 support {trace['tier1_support']})"
+    )
+    print(f"\nSaved to {output}")

@@ -7,6 +7,12 @@ which needs a Groq tier with a bigger tokens-per-minute budget.
 Separately, --search runs the discovery loop on a retrieval request — often one
 naming a seed paper by URL or DOI — and saves the related papers it finds;
 --eval-retrieval scores that loop against the seed's held-out reference list.
+
+The VCF side is its own pair of modes. --cohort joins the BIG-TB resistance
+table to the listed VCFs and reports the labelled dataset size per drug;
+--predict DRUG reads each isolate's VCF, asks the model for a resistant /
+not resistant / unknown call with a reasoning trace, and scores both the calls
+against the DST phenotype and the traces against the variants actually present.
 """
 
 import argparse
@@ -15,11 +21,24 @@ import sys
 from pathlib import Path
 
 from tb_search.assess import assess_documents
+from tb_search.catalogue import drug_key, known_drugs, panel_for
+from tb_search.cohort import DATA_DIR, CohortError, load_cohort
 from tb_search.config import DEFAULT_MODEL, ConfigError, load_settings
 from tb_search.discovery import DiscoveryConfig, discover
 from tb_search.documents import EXCERPT_CHARS, collect_docs, resolve_input
-from tb_search.evaluate import evaluate_retrieval, evaluate_screening
-from tb_search.report import discovered_rows, write_papers, write_results
+from tb_search.evaluate import (
+    evaluate_resistance,
+    evaluate_retrieval,
+    evaluate_screening,
+)
+from tb_search.report import (
+    discovered_rows,
+    write_cohort,
+    write_papers,
+    write_predictions,
+    write_results,
+)
+from tb_search.resistance import predict_samples
 from tb_search.retrieval import retrieve_papers
 from tb_search.screening import (
     build_agent,
@@ -100,6 +119,62 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(SOURCE_NAMES),
         help="[--search] Comma-separated literature sources to query and merge "
         f"(default: {','.join(SOURCE_NAMES)}).",
+    )
+    parser.add_argument(
+        "--cohort",
+        action="store_true",
+        help="Join the resistance table to the listed BIG-TB VCFs and report the "
+        "labelled dataset size per drug. No LLM calls. Output defaults to "
+        "tb_cohort.json.",
+    )
+    parser.add_argument(
+        "--predict",
+        metavar="DRUG",
+        help="Predict resistance to DRUG from each isolate's VCF, with a reasoning "
+        f"trace. Graded drugs: {', '.join(known_drugs())}. Output defaults to "
+        "tb_resistance_<drug>.json.",
+    )
+    parser.add_argument(
+        "--vcf-root",
+        metavar="DIR",
+        help="[--predict] Directory the VCFs actually live in, replacing the "
+        "cluster path recorded in big_tb_file_paths.txt.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        default=str(DATA_DIR),
+        help=f"[--cohort --predict] Where the cohort files live (default: {DATA_DIR}).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="[--predict] Isolates to predict over (default: 20).",
+    )
+    parser.add_argument(
+        "--balance",
+        action="store_true",
+        help="[--predict] Take equal numbers of resistant and susceptible isolates, "
+        "so accuracy is not dominated by the susceptible majority.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="[--predict] Sampling seed, so a run can be repeated (default: 0).",
+    )
+    parser.add_argument(
+        "--min-af",
+        type=float,
+        default=0.0,
+        help="[--predict] Drop variants below this alternate-allele frequency; "
+        "0 keeps them all (default: 0).",
+    )
+    parser.add_argument(
+        "--keep-filtered",
+        action="store_true",
+        help="[--predict] Also use variants the caller did not mark PASS.",
     )
     parser.add_argument(
         "--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL})."
@@ -190,8 +265,89 @@ def run_discovery(args, output: Path | None) -> int:
     return 0
 
 
+def run_cohort(args, output: Path | None) -> int:
+    """--cohort: join the resistance table to the VCF list, no LLM involved."""
+    try:
+        cohort = load_cohort(args.data_dir)
+    except CohortError as e:
+        return fail(e)
+    write_cohort(cohort, output or Path("tb_cohort.json"))
+    return 0
+
+
+def run_predict(args, output: Path | None) -> int:
+    """--predict DRUG: VCF in, resistance call plus a checked reasoning trace out."""
+    drug = drug_key(args.predict)
+    panel = panel_for(drug)
+    try:
+        cohort = load_cohort(args.data_dir)
+    except CohortError as e:
+        return fail(e)
+
+    if drug not in cohort.drugs:
+        return fail(
+            f"No phenotype column for {args.predict!r} in the resistance table. "
+            f"Graded drugs: {', '.join(known_drugs())}"
+        )
+    samples = cohort.dataset(
+        drug,
+        limit=max(1, args.limit),
+        balance=args.balance,
+        seed=args.seed,
+        vcf_root=args.vcf_root,
+    )
+    if not samples:
+        return fail(f"No isolate has both a VCF and a {drug} phenotype.")
+
+    try:
+        settings = load_settings(model=args.model, temperature=args.temperature)
+        check_connection(settings)
+    except ConfigError as e:
+        return fail(e)
+
+    counts = {call: sum(1 for s in samples if s.phenotype == call) for call in "RS"}
+    print(
+        f"Predicting {drug} resistance for {len(samples)} isolate(s) "
+        f"({counts['R']} R, {counts['S']} S) "
+        f"[{settings.source} {settings.model}]"
+    )
+    print(f"  panel: tier 1 {', '.join(panel.tier1) or 'none'}", end="")
+    print(f"; tier 2 {', '.join(panel.tier2) or 'none'}" if panel.tier2 else "")
+    if panel.is_fallback:
+        print(f"  ! no graded panel for {drug}; using the union of all panels")
+    missing = next((s for s in samples if not Path(s.vcf_path).exists()), None)
+    if missing is not None:
+        print(
+            f"  ! {missing.vcf_path} is not readable here. The BIG-TB VCFs live on "
+            "the cluster; pass --vcf-root to point at a local copy."
+        )
+    print()
+
+    rows = predict_samples(
+        build_screener(settings),
+        samples,
+        drug,
+        pass_only=not args.keep_filtered,
+        min_allele_frequency=args.min_af,
+    )
+    scores = evaluate_resistance(rows)
+    write_predictions(
+        rows,
+        scores,
+        f"{settings.source}/{settings.model}",
+        drug,
+        output or Path(f"tb_resistance_{drug}.json"),
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    output = Path(args.output) if args.output else None
+    if args.cohort:
+        return run_cohort(args, output)
+    if args.predict:
+        return run_predict(args, output)
     if args.eval_retrieval or (args.search and not args.agent):
         return run_discovery(args, Path(args.output) if args.output else None)
 

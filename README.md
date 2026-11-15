@@ -5,7 +5,7 @@
 ![flow-3](./assets/v2-3.png)
 ![relevance_check](./assets/paper_relevance_check.png)
 
-Two capabilities, with every LLM call going through
+Three capabilities, with every LLM call going through
 [Biomni](https://github.com/snap-stanford/Biomni)'s Groq plumbing:
 
 - **Retrieval** (`--search`) — give it a request such as "find me relevant papers
@@ -20,6 +20,11 @@ Two capabilities, with every LLM call going through
   returns an assessment per document: `tb_related`, a 0–3 `relevance`, paper
   type, drugs, genes/variants, methods, datasets, and an `evidence` quote that
   is checked against the text (`evidence_verified`).
+- **Resistance prediction from VCFs** (`--cohort`, `--predict`) — ingest the
+  BIG-TB isolate VCFs, and for a given drug predict `resistant` /
+  `not_resistant` / `unknown` with a reasoning trace. Calls are scored against
+  the phenotypic DST labels, and each trace is graded against the variants the
+  model was actually shown.
 
 Screening has two modes:
 
@@ -39,6 +44,68 @@ Every mode calls Groq, so `GROQ_API_KEY` is required; there is no offline mode.
 `SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional: both sources
 answer without them, only slower (`CROSSREF_MAILTO` is just an email address and
 puts requests in Crossref's faster "polite" pool).
+
+## Resistance prediction from VCFs
+
+The dataset comes from two files in `data/cleaned_vcf_paths/`:
+`master_resistance_table.csv` (phenotypic DST, R/S per isolate per drug) and
+`big_tb_file_paths.txt` (the BIG-TB VCF paths on the cluster). They join on the
+table's `New_ID` column, which matches the VCF filename stem for all 17,942
+BIG-TB isolates, giving a labelled dataset per drug — 17.6k isolates for
+rifampicin, 17.4k for isoniazid, down to a few dozen for the rarely tested
+drugs.
+
+Variants are named without needing an annotated VCF. Each position is looked up
+in `data/h37rv_genes.tsv` (NCBI's feature table for H37Rv, NC_000962.3) to get
+the gene, the codon number, or a promoter offset, and the codon is then
+translated against the reference in `data/h37rv.fna.gz` to get the actual
+protein consequence. So `761155 C>T` is presented as `rpoB S450L`, `761156 G>A`
+as `rpoB S450S synonymous`, `1673425 C>T` as `fabG1 -15 (promoter)` and a 1 bp
+deletion in pncA as a frameshift. When the VCF carries its own `ANN`/`CSQ`
+field, that annotation is used instead.
+
+Naming the protein change matters more than it looks: shown only "rpoB codon
+453", the model calls any hotspot codon resistant, because it cannot tell a
+silent change from a missense one. Shown "rpoB S450S synonymous", it correctly
+rules the variant out.
+
+Because the reference is loaded anyway, every record's `REF` is checked against
+H37Rv. A run that reports mismatches was called against a different reference or
+has shifted coordinates, and its gene and codon assignments cannot be trusted.
+
+Variants are then filtered to the genes the WHO catalogue grades for that drug,
+split into tier 1 (established mechanism) and tier 2 (secondary).
+
+**Each trace is checked, not just read.** Every prediction is stored next to the
+variants it was shown, so three things are verified mechanically:
+
+| check | what it catches |
+| --- | --- |
+| `variants_resolve` | the model cited a variant that was never in the VCF |
+| `genes_on_panel` | the model reasoned from a gene not graded for that drug |
+| `call_grounded` | a `resistant` call that rests on no variant at all |
+
+`tier1_support` additionally records whether the call rests on a tier 1 gene
+rather than only a secondary one. A trace is `valid` when nothing in it was
+invented or self-contradictory — accuracy and trace validity are reported
+separately, because a run can be accurate and still be reasoning from variants
+that were not there.
+
+```bash
+# the labelled dataset size per drug; no LLM calls
+uv run cli.py --cohort
+
+# predict, on a balanced sample, with the VCFs mounted locally
+uv run cli.py --predict isoniazid --limit 40 --balance --vcf-root /path/to/vcfs
+uv run cli.py --predict rifampicin --limit 100 --balance --seed 1
+```
+
+The BIG-TB VCFs live on the cluster, so `--vcf-root` points at wherever they
+actually are; without it the recorded cluster path is used as-is. A run prints
+one line per isolate (the call, whether it matched the DST, and any trace
+problem) and ends with accuracy, sensitivity, specificity, PPV/NPV, the
+confusion matrix and the trace rates. `tb_resistance_<drug>.json` holds every
+prediction with its variant list, reasoning and trace grade.
 
 ## Usage
 
@@ -181,6 +248,15 @@ is reported per document or per lookup instead of ending the run.
 | `--rounds` | `[--search]` Discovery rounds (default 2) |
 | `--budget` | `[--search]` Papers the LLM assesses per round (default 20) |
 | `--gold JSON` | `[screening]` Hand labels `{filename: true/false}`; prints accuracy |
+| `--cohort` | Join the resistance table to the listed VCFs; per-drug dataset sizes. Output: `tb_cohort.json` |
+| `--predict DRUG` | Predict resistance to DRUG from each isolate's VCF, with a checked trace. Output: `tb_resistance_<drug>.json` |
+| `--vcf-root DIR` | `[--predict]` Where the VCFs actually live, replacing the recorded cluster path |
+| `--data-dir DIR` | `[--cohort]`, `[--predict]` Where the cohort files live (default `data/cleaned_vcf_paths`) |
+| `--limit N` | `[--predict]` Isolates to predict over (default 20) |
+| `--balance` | `[--predict]` Equal numbers of resistant and susceptible isolates |
+| `--seed N` | `[--predict]` Sampling seed, so a run repeats (default 0) |
+| `--min-af` | `[--predict]` Drop variants below this alternate-allele frequency (default 0, keep all) |
+| `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
 | `--model` | Groq model id (default: `$GROQ_MODEL` or `openai/gpt-oss-120b`) |
 | `--agent` | Use the full A1 agent tool loop, for screening or `--search` |
@@ -203,9 +279,19 @@ tb_search/
   sources.py       Europe PMC, Semantic Scholar, Crossref: seed lookup, references, citations, search
   discovery.py     the discovery loop: expand, assess, repeat
   assess.py        structured assessment of a paper or local document
-  evaluate.py      retrieval recall and screening accuracy
+  evaluate.py      retrieval recall, screening accuracy, resistance scoring
   screening.py     LLM/agent construction and agent-mode screening
   retrieval.py     one A1 agent run: query (+ seed paper URL) -> paper rows
-  report.py        summary line + JSON output (verdicts and search runs)
+  report.py        summary line + JSON output (verdicts, searches, predictions)
+  genome.py        H37Rv position -> gene, codon, promoter offset, protein change
+  catalogue.py     WHO drug -> resistance gene panels, tier 1 and tier 2
+  vcf.py           read a VCF into named, panel-filtered variants
+  cohort.py        join the resistance table to the VCF paths; per-drug datasets
+  resistance.py    predict resistance for one isolate/drug, and grade the trace
+data/
+  h37rv_genes.tsv        H37Rv gene coordinates (from NCBI NC_000962.3)
+  h37rv.fna.gz           the H37Rv reference sequence, for protein consequences
+  cleaned_vcf_paths/     the resistance table and the BIG-TB VCF path list
 eval/              hand labels for screening
+tests/             offline tests for the VCF pipeline
 ```

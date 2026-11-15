@@ -86,3 +86,92 @@ def evaluate_screening(rows: list[dict], gold_path: Path) -> dict:
             row["file"] for row in judged if row.get("evidence_verified") is False
         ],
     }
+
+
+def _rate(numerator: int, denominator: int) -> float | None:
+    """A rounded rate, or None when there is nothing to divide by."""
+    return round(numerator / denominator, 3) if denominator else None
+
+
+def evaluate_resistance(rows: list[dict]) -> dict:
+    """Score resistance predictions against the DST phenotype, and grade the traces.
+
+    Accuracy is computed over answered rows only, so abstention shows up as a
+    lower `answered` rather than as silently wrong calls. The trace block is the
+    other half of the picture: a run can be accurate and still be reasoning from
+    variants that were never in the VCF.
+    """
+    calls = {"resistant": "R", "not_resistant": "S"}
+    matrix = {"RR": 0, "RS": 0, "SR": 0, "SS": 0}  # truth then call
+    unknown = {"R": 0, "S": 0}
+    errors = [row for row in rows if row.get("error")]
+
+    for row in rows:
+        truth = row.get("phenotype")
+        if truth not in ("R", "S"):
+            continue
+        called = calls.get(row.get("call", ""))
+        if called is None:
+            unknown[truth] += 1
+        else:
+            matrix[truth + called] += 1
+
+    answered = sum(matrix.values())
+    correct = matrix["RR"] + matrix["SS"]
+    resistant = matrix["RR"] + matrix["RS"]
+    susceptible = matrix["SS"] + matrix["SR"]
+
+    graded = [row["trace"] for row in rows if isinstance(row.get("trace"), dict)]
+    valid = sum(1 for trace in graded if trace.get("valid"))
+    cited = [trace for trace in graded if trace.get("cited_variants")]
+
+    return {
+        "n": len(rows),
+        "answered": answered,
+        "unknown": sum(unknown.values()),
+        "unknown_by_phenotype": unknown,
+        "errors": len(errors),
+        "confusion": {
+            "true_resistant_called_resistant": matrix["RR"],
+            "true_resistant_called_susceptible": matrix["RS"],
+            "true_susceptible_called_resistant": matrix["SR"],
+            "true_susceptible_called_susceptible": matrix["SS"],
+        },
+        "accuracy": _rate(correct, answered),
+        # Sensitivity is the number that matters clinically: a missed resistant
+        # isolate is a patient put on a drug that will not work.
+        "sensitivity": _rate(matrix["RR"], resistant),
+        "specificity": _rate(matrix["SS"], susceptible),
+        "ppv": _rate(matrix["RR"], matrix["RR"] + matrix["SR"]),
+        "npv": _rate(matrix["SS"], matrix["SS"] + matrix["RS"]),
+        "trace": {
+            "graded": len(graded),
+            "valid": _rate(valid, len(graded)),
+            "hallucinated_variants": _rate(
+                sum(1 for trace in graded if not trace.get("variants_resolve")),
+                len(graded),
+            ),
+            "off_panel_genes": _rate(
+                sum(1 for trace in graded if not trace.get("genes_on_panel")),
+                len(graded),
+            ),
+            "ungrounded_resistant_calls": _rate(
+                sum(1 for trace in graded if not trace.get("call_grounded")),
+                len(graded),
+            ),
+            "tier1_support": _rate(
+                sum(1 for trace in cited if trace.get("tier1_support")), len(cited)
+            ),
+        },
+        "misses": [
+            {
+                "isolate": row["isolate"],
+                "phenotype": row["phenotype"],
+                "call": row["call"],
+                "reasoning": row.get("reasoning", ""),
+            }
+            for row in rows
+            if row.get("phenotype") in ("R", "S")
+            and calls.get(row.get("call", "")) not in (None, row["phenotype"])
+        ],
+    }
