@@ -1,4 +1,4 @@
-# tb-agentic-search
+# tb-knowledge-discovery
 
 ![flow-1](./assets/v2-1.png)
 ![flow-2](./assets/v2-2.png)
