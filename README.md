@@ -49,7 +49,7 @@ cp .env.example .env   # optional: everything in it has a default
 ```
 
 Every mode needs a model server to call, and nothing in `.env` is required to
-reach one: the defaults are `Qwen/Qwen3-32B` at `http://localhost:8000/v1`, so
+reach one: the defaults are `Qwen/Qwen3-8B` at `http://localhost:8000/v1`, so
 `--base-url` (or `VLLM_BASE_URL`) is all that changes when the server lives on
 a compute node. `SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional:
 both sources
@@ -134,7 +134,7 @@ agent, so `--agent` works either way:
 | `Ollama` | a pulled Ollama model on its own port | only what the model leaves in `<think>` tags |
 
 `Custom` is the one to use on the cluster. The default model is
-`Qwen/Qwen3-32B`: vLLM serves it with a `qwen3` reasoning parser *and* with
+`Qwen/Qwen3-8B`: vLLM serves it with a `qwen3` reasoning parser *and* with
 tool calling, and biomni reaches it as an ordinary OpenAI-compatible model,
 which is what A1 needs to call its tools — all three at once, which not every
 model manages.
@@ -157,17 +157,18 @@ venv the first time, and serves:
 scripts/setup_vllm_32g.sh        # from the login node; re-execs into srun --pty
 ```
 
-32 GB does not hold `Qwen/Qwen3-32B` in bf16 — the weights alone are ~64 GB — so
-that script defaults to `Qwen/Qwen3-32B-AWQ`, the 4-bit build of the same model
-at ~18 GB, which leaves room for the KV cache at the 64k context `--agent`
-needs. Same family, so the reasoning and tool-call parsers are unchanged; just
-pass the served id to the client (`--model Qwen/Qwen3-32B-AWQ`). Set
-`MODEL=Qwen/Qwen3-8B` for an unquantized model on the same card.
+`Qwen/Qwen3-8B` in bf16 is ~16 GB of weights, so a single 32 GB card holds it
+with room left for the KV cache at the 64k context `--agent` needs — which is
+why it is the default everywhere rather than a fallback, and why one GPU is
+enough for every mode. For a larger model on the same card,
+`MODEL=Qwen/Qwen3-32B-AWQ` is the 4-bit build of the 32B at ~18 GB: the same
+family, so the reasoning and tool-call parsers are unchanged and only the
+served id passed to the client changes (`--model Qwen/Qwen3-32B-AWQ`).
 
 It runs, in effect:
 
 ```bash
-vllm serve Qwen/Qwen3-32B --port 8000 \
+vllm serve Qwen/Qwen3-8B --port 8000 \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice --tool-call-parser hermes \
     --max-model-len 65536
@@ -186,7 +187,7 @@ inference engine only by URL:
 ```bash
 # resistance prediction, with thinking captured per isolate
 uv run cli.py --predict rifampicin --limit 40 --balance \
-    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-32B \
+    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-8B \
     --reasoning-effort high
 
 # from a laptop, through a tunnel: ssh -N -L 8000:gpu042:8000 unity.rc.umass.edu
@@ -261,7 +262,7 @@ A search run echoes each lookup as it goes (the round number in brackets),
 then each assessed paper with its 0–3 relevance, then the papers it settled on:
 
 ```
-Searching [2 round(s), Custom/Qwen/Qwen3-32B]
+Searching [2 round(s), Custom/Qwen/Qwen3-8B]
   query: find me relevant papers like this paper https://...
 
   seed: BIG-TB: A benchmark for ... (2026) [PPR:PPR1226747]
@@ -275,6 +276,79 @@ Papers related to the query (8):
       https://doi.org/10.64898/2026.04.08.717138
       Provides a TB drug resistance benchmark similar to BIG-TB.
 ```
+
+## Architecture
+
+Two processes and an HTTP boundary. The pipeline runs wherever you launched it
+— a login node, or a laptop through an SSH tunnel — and knows the model only as
+a URL; the model runs in its own Slurm job on a GPU node. Nothing in the
+pipeline holds weights, and nothing in the server holds pipeline state, so the
+server can be restarted, resized or swapped for a different model id without
+touching the code.
+
+```mermaid
+flowchart TB
+    subgraph ext["literature sources — HTTPS, read-only"]
+        direction LR
+        EPMC["Europe PMC"]
+        S2["Semantic Scholar"]
+        CR["Crossref"]
+    end
+
+    subgraph disk["local data — read off disk, no network"]
+        direction LR
+        REF["data/h37rv.fna.gz<br/>reference sequence"]
+        GENES["data/h37rv_genes.tsv<br/>gene coordinates"]
+        VCF["data/cleaned_vcf_paths/<br/>BIG-TB VCFs (--vcf-root)"]
+    end
+
+    subgraph client["client process — login node, or a laptop over an SSH tunnel"]
+        CLI["<b>cli.py</b><br/>flags + .env"]
+        CFG["config.load_settings<br/>→ Settings; a hosted source<br/>is refused here, not later"]
+        CHK["screening.check_connection<br/>the server answers, with this model"]
+
+        SCREEN["<b>screening</b> (default)<br/>documents → assess → verdicts"]
+        SEARCH["<b>--search</b> / <b>--eval-retrieval</b><br/>sources → discovery → assess"]
+        COHORT["<b>--cohort</b><br/>cohort join — no model calls"]
+        PREDICT["<b>--predict</b><br/>cohort → vcf → genome → catalogue<br/>→ resistance: call + graded trace"]
+
+        MODEL["the single model object for the run<br/><b>build_screener</b> → ReasoningChatOpenAI<br/><b>build_agent</b> → biomni A1 (--agent)"]
+        REPORT["evaluate.py + report.py<br/>scores, console summary, JSON"]
+    end
+
+    subgraph server["inference server — its own Slurm job on a GPU node"]
+        VLLM["vllm serve Qwen/Qwen3-8B<br/>--reasoning-parser qwen3<br/>--enable-auto-tool-choice<br/>--max-model-len 65536"]
+    end
+
+    CLI --> CFG --> CHK
+    CHK --> SCREEN & SEARCH & COHORT & PREDICT
+    SEARCH <-->|"sources.py"| ext
+    PREDICT -->|"vcf.py, genome.py"| disk
+    COHORT --> disk
+    SCREEN --> MODEL
+    SEARCH --> MODEL
+    PREDICT --> MODEL
+    MODEL <-->|"HTTP — POST /v1/chat/completions"| VLLM
+    SCREEN --> REPORT
+    SEARCH --> REPORT
+    COHORT --> REPORT
+    PREDICT --> REPORT
+
+    classDef boundary stroke-width:3px
+    class MODEL,VLLM boundary
+```
+
+The layering is deliberate in three places:
+
+- **Biomni sits at the model boundary, not around the pipeline.** It supplies
+  the chat model and, under `--agent`, the A1 tool loop. Every prompt, every
+  source client, the VCF reader and all the grading are this repo's (see [How it
+  uses Biomni](#how-it-uses-biomni)).
+- **The genomic layer is pure and offline.** `vcf.py`, `genome.py` and
+  `catalogue.py` turn a VCF into named, panel-filtered variants with no model
+  in the loop, which is why `tests/` can cover them without a server.
+- **Grading is separate from predicting.** `resistance.check_trace` and
+  `evaluate.py` only read rows, so a finished run can be re-scored from its JSON.
 
 ## How a run flows
 
@@ -323,6 +397,57 @@ of its reply (`retrieval.py`). `--eval-retrieval` wraps `discover()`: it hides
 the seed's reference list, runs the same loop, and reports recall@10/25/50/100
 against that list (`evaluate.py`).
 
+## The lifecycle of one request
+
+Setup happens once per run; the rest repeats per document, per candidate paper
+or per isolate. The model is never trusted to have answered well — every reply
+is salvaged, normalized and checked before it becomes a row.
+
+```mermaid
+flowchart TB
+    subgraph setup["once, before the first call"]
+        L1["config.load_settings<br/>.env + flags → Settings"]
+        L2["screening.check_connection<br/>the model list, then a 1-token call:<br/>a server that is down, or serving a<br/>different id, fails here"]
+        L3["screening._prime_environment<br/>BIOMNI_CUSTOM_BASE_URL / _API_KEY,<br/>where biomni's own code looks"]
+        L4["build_screener — or build_agent<br/>one model object for the whole run"]
+        L1 --> L2 --> L3 --> L4
+    end
+
+    subgraph percall["per document, per candidate paper, per isolate"]
+        P1["prompt built — prompts.py<br/>a section excerpt (documents.py), a<br/>variant listing (resistance.py), or<br/>the query-writing prompt"]
+        P2["reasoning.apply_reasoning_effort<br/>reasoning_effort rides on the request"]
+        P3["screening.retry_transient<br/>POST /v1/chat/completions"]
+        P4["vLLM<br/>prefill → decode; the reasoning parser<br/>splits the thinking out of the answer"]
+        P5["reasoning.answer_and_trace<br/>(answer, trace) — langchain drops that<br/>field as non-standard, so the ChatOpenAI<br/>subclass keeps it; on Ollama it comes<br/>out of the model's think tags instead"]
+        P6["verdicts.parse_assessment<br/>or resistance.parse_prediction<br/>the JSON, out of prose or code fences"]
+        P7["normalize_assessment — assess.py<br/>facets coerced, the evidence quote<br/>checked against the text, abstention<br/><br/>normalize_prediction — resistance.py<br/>the call folded to one of three"]
+        P8["resistance.check_trace<br/>variants_resolve, genes_on_panel,<br/>call_grounded, tier1_support"]
+        P9["one row, always"]
+        P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8 --> P9
+        RETRY["a busy or restarting server:<br/>retried twice. a context-length<br/>failure: not retried, it would repeat"]
+        P3 -.-> RETRY -.-> P3
+        P6 -.->|"unreadable VCF, failed call,<br/>unparseable reply → a row<br/>carrying an error, so one bad<br/>input cannot end a sweep"| P9
+    end
+
+    subgraph finish["once, at the end"]
+        F1["evaluate.py<br/>accuracy and trace validity scored apart:<br/>a run can be accurate and still reason<br/>from variants that were not there"]
+        F2["report.py<br/>console summary + JSON, with the model id<br/>and reasoning effort recorded — traces<br/>only compare across runs at equal effort"]
+        F1 --> F2
+    end
+
+    L4 --> P1
+    P9 -->|"next item"| P1
+    P9 --> F1
+
+    classDef remote stroke-width:3px
+    class P4 remote
+```
+
+Under `--agent` the middle of that stack changes shape: one `agent.go()` or
+`go_stream()` becomes however many requests A1's tool loop needs, each carrying
+its ~35k-token system prompt, and the final reply is parsed into rows the same
+way. The setup and the checks on either side are unchanged.
+
 ## How it uses Biomni
 
 Biomni supplies the model and the optional agent; the pipeline around them is
@@ -339,7 +464,7 @@ this repo's, including every prompt (`prompts.py`). The touchpoints are few:
 Five details are easy to get wrong, which is why the code spells them out:
 
 - The source is always passed explicitly. Biomni's auto-detection sees the
-  slash in a HuggingFace id like `Qwen/Qwen3-32B` and would route it to Ollama
+  slash in a HuggingFace id like `Qwen/Qwen3-8B` and would route it to Ollama
   on its own. `Custom` is the branch that points langchain at our server; A1
   takes `base_url` too, so the agent's tool calling runs against it.
 - The endpoint is copied into the environment (`BIOMNI_CUSTOM_BASE_URL`,
@@ -381,7 +506,7 @@ document or per lookup instead of ending the run.
 | `--min-af` | `[--predict]` Drop variants below this alternate-allele frequency (default 0, keep all) |
 | `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
-| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-32B`) |
+| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-8B`) |
 | `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). Applies to every mode, `--agent` included |
 | `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (default: `$LLM_REASONING_EFFORT`, else the server's own default) |
 | `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`) |

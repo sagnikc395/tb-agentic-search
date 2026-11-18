@@ -4,7 +4,7 @@ Everything talks to a model we serve ourselves. On Unity that is vLLM, started
 in its own job with a reasoning parser, so this process — biomni included —
 knows the inference engine only by URL:
 
-    vllm serve Qwen/Qwen3-32B --reasoning-parser qwen3 \
+    vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
         --enable-auto-tool-choice --tool-call-parser hermes --port 8000
 
 biomni calls that the "Custom" source, and both the plain per-call screener and
@@ -83,7 +83,7 @@ def _check_ollama(settings: Settings) -> None:
         raise ConfigError(
             f"Ollama did not answer at {host}: {e}\nStart it with `ollama serve`."
         ) from e
-    # Ollama tags carry a version suffix: "qwen3:32b" answers to "qwen3:32b"
+    # Ollama tags carry a version suffix: "qwen3:8b" answers to "qwen3:8b"
     # and, for the default tag, to "qwen3".
     if pulled and not any(
         name == settings.model or name.split(":")[0] == settings.model
@@ -222,7 +222,7 @@ def build_agent(settings: Settings):
     """Construct a Biomni A1 agent wired to our own model server.
 
     The source matters: biomni's auto-detection sees the slash in a HuggingFace
-    model id like "Qwen/Qwen3-32B" and would route it to Ollama on its own.
+    model id like "Qwen/Qwen3-8B" and would route it to Ollama on its own.
     "Custom" is the branch that points langchain at base_url, which is how the
     agent's tool calling runs against the inference engine on the cluster.
     """

@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=vllm-tb
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/vllm-%j.out
 # Serve the model on Unity, so the agent runs as a separate process that only
@@ -24,13 +24,14 @@
 
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3-32B}"
+MODEL="${MODEL:-Qwen/Qwen3-8B}"
 # Must match the model family; see the table under
 # https://docs.vllm.ai/en/stable/features/reasoning_outputs/
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 PORT="${PORT:-8000}"
-# Tensor-parallel size has to match --gres=gpu:N above.
-TP_SIZE="${TP_SIZE:-2}"
+# Tensor-parallel size has to match --gres=gpu:N above. An 8B model in bf16 is
+# ~16 GB of weights, so one card carries it and there is nothing to split.
+TP_SIZE="${TP_SIZE:-1}"
 
 mkdir -p logs
 module load cuda/12.6 2>/dev/null || true

@@ -5,10 +5,10 @@ this process (and biomni inside it) talking to that engine over HTTP. Start the
 server with a reasoning parser and --reasoning-effort is honoured and the
 model's thinking is recorded next to each prediction:
 
-    vllm serve Qwen/Qwen3-32B --reasoning-parser qwen3 \
+    vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
         --enable-auto-tool-choice --tool-call-parser hermes --port 8000
     tb-search --predict rifampicin --base-url http://$NODE:8000/v1 \
-        --model Qwen/Qwen3-32B --reasoning-effort high
+        --model Qwen/Qwen3-8B --reasoning-effort high
 
 Two screening modes: light (default) makes one small LLM call per document;
 --agent runs the full Biomni A1 agent tool loop, whose ~35k-token system prompt

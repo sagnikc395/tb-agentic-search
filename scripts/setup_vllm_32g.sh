@@ -1,8 +1,8 @@
 #!/bin/bash
 # Set up and serve vLLM in an interactive GPU session with 32 GB of VRAM.
 #
-# The batch job next door (serve_vllm_unity.sbatch) wants two large GPUs and
-# runs unattended; this one is for a single 32 GB card you sit in front of,
+# The batch job next door (serve_vllm_unity.sbatch) runs unattended on an
+# allocated GPU; this one is for a single 32 GB card you sit in front of,
 # which is what a shorter allocation usually gets you. It builds the venv the
 # first time, then serves, so a fresh account needs nothing else.
 #
@@ -14,16 +14,16 @@
 # stays attached to your terminal and dies with it. Already inside a job
 # (SLURM_JOB_ID set), it skips straight to serving.
 #
-# 32 GB does not hold Qwen3-32B in bf16 — the weights alone are ~64 GB — so the
-# default here is the AWQ 4-bit build of the same model: ~18 GB of weights,
-# leaving room for the KV cache at the context length A1 needs. It is the same
-# family, so the `qwen3` reasoning parser and the tool-call parser are
-# unchanged, and tb_search only has to be told the served model id. For an
-# unquantized model on this card, set MODEL=Qwen/Qwen3-8B instead.
+# Qwen3-8B in bf16 is ~16 GB of weights, so a 32 GB card holds the default
+# model with room for the KV cache at the context length A1 needs. For
+# something larger on the same card, set MODEL=Qwen/Qwen3-32B-AWQ, the 4-bit
+# build of the 32B at ~18 GB: the same family, so the `qwen3` reasoning parser
+# and the tool-call parser are unchanged, and tb_search only has to be told the
+# served model id.
 
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3-32B-AWQ}"
+MODEL="${MODEL:-Qwen/Qwen3-8B}"
 # Must match the model family; see the table under
 # https://docs.vllm.ai/en/stable/features/reasoning_outputs/
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
@@ -73,7 +73,8 @@ if [ ! -x "${VLLM_VENV}/bin/vllm" ]; then
     # shellcheck disable=SC1091
     source "${VLLM_VENV}/bin/activate"
     pip install --upgrade pip
-    # autoawq is what reads the 4-bit default model; harmless for a bf16 one.
+    # autoawq is only needed for a 4-bit model like the 32B-AWQ option
+    # above; harmless for the bf16 default.
     pip install vllm autoawq
 else
     # shellcheck disable=SC1091

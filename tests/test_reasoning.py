@@ -77,11 +77,11 @@ def test_the_default_backend_is_a_locally_served_openai_compatible_server(clean_
 
 def test_the_vllm_endpoint_can_come_from_the_environment(clean_env, monkeypatch):
     monkeypatch.setenv("VLLM_BASE_URL", "http://gpu042:8000/v1")
-    monkeypatch.setenv("VLLM_MODEL", "Qwen/Qwen3-32B")
+    monkeypatch.setenv("VLLM_MODEL", "Qwen/Qwen3-8B")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
     settings = load_settings()
     assert settings.base_url == "http://gpu042:8000/v1"
-    assert settings.model == "Qwen/Qwen3-32B"
+    assert settings.model == "Qwen/Qwen3-8B"
     assert settings.reasoning_effort == "high"
     assert "@ http://gpu042:8000/v1" in settings.description
     assert "effort high" in settings.description
