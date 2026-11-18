@@ -5,6 +5,12 @@ variants it was shown, so three things can be checked mechanically: that each
 cited variant was really in the VCF, that each cited gene is really graded for
 that drug, and that a "resistant" call actually rests on a variant. Those checks
 are what separates a biologically grounded trace from a plausible-sounding one.
+
+Two traces are kept per prediction, because they can disagree: the reasoning the
+model wrote into its answer, and the hidden thinking the server separated out
+(vLLM's `reasoning` field, when it runs with a reasoning parser). The second is
+the one that shows how the call was actually reached, so it is stored verbatim
+for the biological-validity read-through.
 """
 
 from dataclasses import dataclass, field
@@ -12,7 +18,8 @@ from dataclasses import dataclass, field
 from tb_search.catalogue import Panel, panel_for
 from tb_search.cohort import Sample
 from tb_search.prompts import RESISTANCE_PROMPT
-from tb_search.screening import _wait_out_rate_limit
+from tb_search.reasoning import answer_and_trace
+from tb_search.screening import retry_transient
 from tb_search.vcf import Variant, VcfError, panel_gene_set, read_vcf
 from tb_search.verdicts import _load_json, as_confidence
 
@@ -32,13 +39,6 @@ CALL_ALIASES = {
     "indeterminate": "unknown",
     "unclear": "unknown",
 }
-
-
-def _reply_text(reply) -> str:
-    content = getattr(reply, "content", reply)
-    if isinstance(content, str):
-        return content
-    return "".join(str(block) for block in content or [])
 
 
 def parse_prediction(answer: str) -> dict | None:
@@ -108,6 +108,11 @@ class TraceCheck:
     call_grounded: bool = True
     # The call rests on a tier 1 gene rather than only a secondary one.
     tier1_support: bool = False
+    # Whether the server returned separated thinking for this call, and how
+    # much of it: an empty trace means there is nothing to read through, not
+    # that the reasoning was sound.
+    thinking_captured: bool = False
+    thinking_words: int = 0
     hallucinated_ids: list[int] = field(default_factory=list)
     off_panel_genes: list[str] = field(default_factory=list)
     cited_labels: list[str] = field(default_factory=list)
@@ -125,6 +130,8 @@ class TraceCheck:
             "genes_on_panel": self.genes_on_panel,
             "call_grounded": self.call_grounded,
             "tier1_support": self.tier1_support,
+            "thinking_captured": self.thinking_captured,
+            "thinking_words": self.thinking_words,
             "hallucinated_ids": self.hallucinated_ids,
             "off_panel_genes": self.off_panel_genes,
             "cited_variants": self.cited_labels,
@@ -164,11 +171,25 @@ def check_trace(prediction: dict, variants: list[Variant], panel: Panel) -> Trac
         check.notes.append("called resistant without citing any variant")
 
     check.tier1_support = any(panel.tier_of(v.gene) == 1 for v in resolved)
+
+    thinking = str(prediction.get("reasoning_trace") or "")
+    check.thinking_captured = bool(thinking.strip())
+    check.thinking_words = len(thinking.split())
+    if not check.thinking_captured:
+        check.notes.append(
+            "no separated reasoning trace returned; serve the model with a "
+            "vLLM reasoning parser to capture one"
+        )
     return check
 
 
 def predict(llm, sample: Sample, variants: list[Variant], panel: Panel) -> dict | None:
-    """One LLM call for one isolate/drug; None when no reply could be parsed."""
+    """One LLM call for one isolate/drug; None when no reply could be parsed.
+
+    The returned prediction carries `reasoning_trace`: the thinking the server
+    separated from the answer, which is empty when the model was served without
+    a reasoning parser and wrote none.
+    """
     prompt = (
         RESISTANCE_PROMPT.replace("{DRUG}", panel.drug)
         .replace("{TIER1}", ", ".join(panel.tier1) or "none")
@@ -187,14 +208,15 @@ def predict(llm, sample: Sample, variants: list[Variant], panel: Panel) -> dict 
     for strict in (False, True):  # second pass only asks for stricter JSON
         if strict:
             prompt += "\n\nREMINDER: reply with ONLY the JSON object, no other text."
-        reply = _wait_out_rate_limit(llm.invoke, prompt)
-        data = parse_prediction(_reply_text(reply))
+        reply = retry_transient(llm.invoke, prompt)
+        answer, trace = answer_and_trace(reply)
+        data = parse_prediction(answer)
         if data:
-            return normalize_prediction(data)
+            return normalize_prediction(data, trace)
     return None
 
 
-def normalize_prediction(data: dict) -> dict:
+def normalize_prediction(data: dict, reasoning_trace: str = "") -> dict:
     """Coerce a parsed reply into the one prediction shape."""
     call = normalize_call(data.get("call", data.get("prediction")))
     return {
@@ -204,6 +226,9 @@ def normalize_prediction(data: dict) -> dict:
         "genes_cited": _strings(data.get("genes_cited")),
         "mechanism": str(data.get("mechanism", "")).strip(),
         "reasoning": str(data.get("reasoning", "")).strip(),
+        # The server-separated thinking, kept verbatim: it is the trace whose
+        # biological validity is being judged.
+        "reasoning_trace": reasoning_trace.strip(),
         "unknown_reason": str(data.get("unknown_reason", "")).strip()
         if call == "unknown"
         else "",
@@ -243,6 +268,7 @@ def predict_sample(
             "error": str(e),
             "variants": [],
             "reasoning": "VCF could not be read",
+            "reasoning_trace": "",
             "trace": None,
         }
 
@@ -257,6 +283,7 @@ def predict_sample(
             "error": f"prediction call failed: {e}",
             "variants": [variant.as_dict() for variant in variants],
             "reasoning": "",
+            "reasoning_trace": "",
             "trace": None,
         }
 
@@ -268,6 +295,7 @@ def predict_sample(
             "error": "no parseable prediction returned",
             "variants": [variant.as_dict() for variant in variants],
             "reasoning": "",
+            "reasoning_trace": "",
             "trace": None,
         }
 

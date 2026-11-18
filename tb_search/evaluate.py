@@ -93,6 +93,18 @@ def _rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 3) if denominator else None
 
 
+def _median(values: list[int]) -> int | None:
+    """The middle value, or None for an empty list. Median, because one runaway
+    trace should not move the number that describes a run."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
 def evaluate_resistance(rows: list[dict]) -> dict:
     """Score resistance predictions against the DST phenotype, and grade the traces.
 
@@ -161,6 +173,20 @@ def evaluate_resistance(rows: list[dict]) -> dict:
             ),
             "tier1_support": _rate(
                 sum(1 for trace in cited if trace.get("tier1_support")), len(cited)
+            ),
+            # How many calls came with the model's own thinking attached, and
+            # how long it ran: with no separated trace there is nothing to read
+            # through for biological validity.
+            "thinking_captured": _rate(
+                sum(1 for trace in graded if trace.get("thinking_captured")),
+                len(graded),
+            ),
+            "median_thinking_words": _median(
+                [
+                    trace.get("thinking_words") or 0
+                    for trace in graded
+                    if trace.get("thinking_captured")
+                ]
             ),
         },
         "misses": [

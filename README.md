@@ -6,7 +6,9 @@
 ![relevance_check](./assets/paper_relevance_check.png)
 
 Three capabilities, with every LLM call going through
-[Biomni](https://github.com/snap-stanford/Biomni)'s Groq plumbing:
+[Biomni](https://github.com/snap-stanford/Biomni) to a model you serve yourself
+— vLLM on the cluster, or Ollama locally (see
+[Serving the model](#serving-the-model-vllm-on-unity)). No hosted API, no key.
 
 - **Retrieval** (`--search`) — give it a request such as "find me relevant papers
   like this paper <paper-url>". It resolves the seed paper on Europe PMC,
@@ -26,22 +28,31 @@ Three capabilities, with every LLM call going through
   the phenotypic DST labels, and each trace is graded against the variants the
   model was actually shown.
 
+Serving the model ourselves is what makes the reasoning traces usable: a vLLM
+server started with a reasoning parser returns the model's thinking separated
+from its answer, and every prediction stores that trace verbatim beside the
+variants it was shown. It is also what gives the A1 agent a tool-calling
+backend that costs GPU hours rather than per-token billing.
+
 Screening has two modes:
 
-- **light** (default) — one small LLM call per document (~1.5k tokens), so a
-  free Groq account's 8000-tokens-per-minute budget holds.
+- **light** (default) — one small LLM call per document (~1.5k tokens).
 - **`--agent`** — the full Biomni A1 agent tool loop. A1's system prompt is
-  ~35k tokens, so this needs a Groq tier with a bigger TPM budget.
+  ~35k tokens, so the server needs a context window well past that
+  (`--max-model-len 65536`) and tool calling enabled.
 
 ## Setup
 
 ```bash
 uv sync
-cp .env.example .env   # then fill in GROQ_API_KEY
+cp .env.example .env   # optional: everything in it has a default
 ```
 
-Every mode calls Groq, so `GROQ_API_KEY` is required; there is no offline mode.
-`SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional: both sources
+Every mode needs a model server to call, and nothing in `.env` is required to
+reach one: the defaults are `Qwen/Qwen3-32B` at `http://localhost:8000/v1`, so
+`--base-url` (or `VLLM_BASE_URL`) is all that changes when the server lives on
+a compute node. `SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional:
+both sources
 answer without them, only slower (`CROSSREF_MAILTO` is just an email address and
 puts requests in Crossref's faster "polite" pool).
 
@@ -107,6 +118,96 @@ problem) and ends with accuracy, sensitivity, specificity, PPV/NPV, the
 confusion matrix and the trace rates. `tb_resistance_<drug>.json` holds every
 prediction with its variant list, reasoning and trace grade.
 
+## Serving the model (vLLM on Unity)
+
+The model runs on our own hardware, which is what puts the model choice, the
+reasoning settings and the response format under our control — and lets the
+server hand back the model's thinking as its own field instead of leaving it
+mixed into the answer.
+
+Biomni has two backends that serve a model locally, and both drive the A1
+agent, so `--agent` works either way:
+
+| `--source` | what it is | reasoning traces |
+| --- | --- | --- |
+| `Custom` (default) | any OpenAI-compatible server, i.e. `vllm serve` | separated into `reasoning`, captured per prediction |
+| `Ollama` | a pulled Ollama model on its own port | only what the model leaves in `<think>` tags |
+
+`Custom` is the one to use on the cluster. The default model is
+`Qwen/Qwen3-32B`: vLLM serves it with a `qwen3` reasoning parser *and* with
+tool calling, and biomni reaches it as an ordinary OpenAI-compatible model,
+which is what A1 needs to call its tools — all three at once, which not every
+model manages.
+
+`scripts/serve_vllm_unity.sbatch` starts the server in its own Slurm job:
+
+```bash
+sbatch scripts/serve_vllm_unity.sbatch
+tail -f logs/vllm-<jobid>.out    # prints the exact --base-url to use
+```
+
+(The job's defaults — partition, GPU count, the venv holding vLLM — are set at
+the top of that file and will want matching to your Unity allocation.)
+
+It runs, in effect:
+
+```bash
+vllm serve Qwen/Qwen3-32B --port 8000 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --max-model-len 65536
+```
+
+`--reasoning-parser` is what separates the thinking into the response's
+`reasoning` field ([vLLM
+docs](https://docs.vllm.ai/en/stable/features/reasoning_outputs/)); the parser
+name has to match the model family. `--enable-auto-tool-choice` is what lets
+the A1 agent do its tool calling against this server, and `--max-model-len` has
+to clear A1's ~35k-token system prompt for `--agent` to work at all.
+
+Then point any mode at it. biomni runs here, in this process, and knows the
+inference engine only by URL:
+
+```bash
+# resistance prediction, with thinking captured per isolate
+uv run cli.py --predict rifampicin --limit 40 --balance \
+    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-32B \
+    --reasoning-effort high
+
+# from a laptop, through a tunnel: ssh -N -L 8000:gpu042:8000 unity.rc.umass.edu
+uv run cli.py --predict isoniazid --base-url http://localhost:8000/v1 ...
+
+# the A1 agent tool loop against the same server
+uv run cli.py --search "papers like <url>" --agent --base-url http://gpu042:8000/v1
+```
+
+`--base-url` is biomni's `Custom` source for the plain per-call screener and
+for the A1 agent alike, and no API key is involved. Before anything else runs,
+the endpoint is pinged and its model list checked, so a job that has not come up
+yet — or a model id that is not the one being served — fails immediately
+instead of mid-run (`--source Ollama` is checked the same way, against
+`ollama`'s own list of pulled models).
+
+A local server has no rate limit, so there is nothing to wait out; a request
+that fails on a busy or restarting server is retried twice, while one that fails
+on context length is not, because it would fail again identically.
+
+`--reasoning-effort` goes out as the request's `reasoning_effort`, which vLLM
+maps onto the chat template's thinking switch. It is recorded in the output
+JSON, because traces are only comparable across runs at the same effort.
+
+**What ends up in the traces.** Each prediction carries two: `reasoning`, what
+the model wrote into its answer, and `reasoning_trace`, the thinking the server
+separated out. They can disagree, and the second is the one that shows how the
+call was actually reached, so it is what the biological-validity read-through
+works from. The run summary reports how many calls came with thinking attached
+and the median length; a model served without a reasoning parser yields empty
+traces and the summary says so.
+
+With `reasoning_content` being the field's older spelling, and langchain's
+`ChatOpenAI` dropping both as non-standard, `tb_search/screening.py` subclasses
+it to keep them — otherwise the traces never reach us at all.
+
 ## Usage
 
 **Screening local documents**
@@ -115,7 +216,7 @@ prediction with its variant list, reasoning and trace grade.
 uv run cli.py                        # screens ./papers, or ../papers when ./papers is absent
 uv run cli.py ../papers               # any directory or single PDF/text file
 uv run cli.py -o out.json             # default output: tb_verdicts.json
-uv run cli.py --agent                 # full A1 agent loop instead (needs TPM)
+uv run cli.py --agent                 # full A1 agent loop instead (needs a big context window)
 uv run cli.py --gold eval/screening_gold.json   # plus accuracy against hand labels
 ```
 
@@ -145,7 +246,7 @@ A search run echoes each lookup as it goes (the round number in brackets),
 then each assessed paper with its 0–3 relevance, then the papers it settled on:
 
 ```
-Searching [2 round(s), Groq/openai/gpt-oss-120b]
+Searching [2 round(s), Custom/Qwen/Qwen3-32B]
   query: find me relevant papers like this paper https://...
 
   seed: BIG-TB: A benchmark for ... (2026) [PPR:PPR1226747]
@@ -174,7 +275,7 @@ cli.py
   load_settings          config.py      .env -> Settings
   resolve_input          documents.py   the directory or single file to read
   collect_docs           documents.py   every PDF/text under it
-  check_connection       screening.py   one 1-token Groq call, so a bad key fails here
+  check_connection       screening.py   the server's model list + a 1-token call, so a server that is down fails here
   build_screener         screening.py   biomni.llm.get_llm -> chat model
   assess_documents       assess.py      one model call per document
     section_excerpt      documents.py   opening + methods + conclusion
@@ -214,27 +315,34 @@ this repo's, including every prompt (`prompts.py`). The touchpoints are few:
 
 | Biomni piece | Where | Used for |
 | --- | --- | --- |
-| `biomni.llm.get_llm` | `screening.build_screener` | the chat model behind every non-agent call: one prompt per document, and query writing |
+| `biomni.llm.get_llm` | `screening._chat_model` | the chat model on the Ollama branch; an OpenAI-compatible server is built here instead, so the reasoning field survives |
 | `biomni.config.default_config` | `build_screener`, `build_agent` | temperature, model and provider; A1 forwards `llm`/`source` but not `temperature` |
 | `biomni.agent.A1` | `screening.build_agent` | the `--agent` path: tool loop, tool retriever, data-lake switch |
 | `agent.go(prompt)` | `screening.classify_documents_agent` | screening in batches of `--batch-size` documents |
 | `agent.go_stream(prompt)` | `retrieval._run_streamed` | search step by step, so its tool calls can be echoed |
 
-Four details are easy to get wrong, which is why the code spells them out:
+Five details are easy to get wrong, which is why the code spells them out:
 
-- `source="Groq"` is always passed explicitly. Biomni's auto-detection sees the
-  slash in `openai/gpt-oss-120b` and would otherwise send the model to Ollama.
-- `GROQ_API_KEY` is copied into the environment before `A1` is built, because
-  Biomni's Groq branch reads it from there, not from our `Settings`.
+- The source is always passed explicitly. Biomni's auto-detection sees the
+  slash in a HuggingFace id like `Qwen/Qwen3-32B` and would route it to Ollama
+  on its own. `Custom` is the branch that points langchain at our server; A1
+  takes `base_url` too, so the agent's tool calling runs against it.
+- The endpoint is copied into the environment (`BIOMNI_CUSTOM_BASE_URL`,
+  `BIOMNI_CUSTOM_API_KEY`) before `A1` is built, because Biomni reads it from
+  there, not from our `Settings`.
+- A1 builds its own chat model, so `build_agent` replaces `agent.llm` with the
+  reasoning-keeping one afterwards; it stays a `ChatOpenAI` subclass because A1
+  calls `with_structured_output` on it.
 - `expected_data_lake_files=[]` (not `None`) is what tells A1 to skip its
   tens-of-GB data-lake download; `--data-lake` turns it back on.
 - `timeout_seconds` comes from `BIOMNI_TIMEOUT_SECONDS` (default 600) and is
   passed only to A1.
 
-A1's system prompt is ~35k tokens and Groq's free tier allows 8k per minute, so
-the default paths avoid A1 entirely. Where a call can still be rejected,
-`_wait_out_rate_limit` retries a 413/TPM error after 65 seconds, and a failure
-is reported per document or per lookup instead of ending the run.
+A1's system prompt is ~35k tokens, against ~1.5k for one light screening call,
+so the default paths avoid A1 entirely: a sweep over thousands of isolates is
+not worth 20x the prefill. Where a call can still fail, `retry_transient`
+retries a busy or restarting server twice, and a failure is reported per
+document or per lookup instead of ending the run.
 
 ## Flags
 
@@ -258,7 +366,10 @@ is reported per document or per lookup instead of ending the run.
 | `--min-af` | `[--predict]` Drop variants below this alternate-allele frequency (default 0, keep all) |
 | `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
-| `--model` | Groq model id (default: `$GROQ_MODEL` or `openai/gpt-oss-120b`) |
+| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-32B`) |
+| `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). Applies to every mode, `--agent` included |
+| `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (default: `$LLM_REASONING_EFFORT`, else the server's own default) |
+| `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`) |
 | `--agent` | Use the full A1 agent tool loop, for screening or `--search` |
 | `--batch-size` | `[--agent]` Documents per agent call (default 2) |
 | `--max-chars` | Excerpt length per document (default 3000) |
@@ -271,8 +382,11 @@ is reported per document or per lookup instead of ending the run.
 
 ```
 cli.py             CLI entry point
+scripts/
+  serve_vllm_unity.sbatch   start the vLLM server on Unity, with a reasoning parser
 tb_search/
-  config.py        Settings loaded from .env / environment
+  config.py        Settings loaded from .env / environment: which local backend, which model
+  reasoning.py     reasoning effort, and pulling a reply's thinking out of it
   documents.py     collect files, extract text and section-aware excerpts
   prompts.py       the assessment, query-writing and agent prompts
   verdicts.py      salvage JSON out of whatever the model returned

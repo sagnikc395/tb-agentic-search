@@ -5,8 +5,9 @@ from pathlib import Path
 
 from tb_search.documents import read_text, section_excerpt
 from tb_search.prompts import ASSESS_PROMPT, DEFAULT_TOPIC
+from tb_search.reasoning import answer_and_trace
 from tb_search.report import verdict_line
-from tb_search.screening import _wait_out_rate_limit
+from tb_search.screening import retry_transient
 from tb_search.verdicts import as_bool, parse_assessment
 
 PAPER_TYPES = ("method", "benchmark", "dataset", "review", "clinical", "agent", "other")
@@ -14,10 +15,14 @@ FACETS = ("drugs", "genes_variants", "methods", "datasets")
 
 
 def _reply_text(reply) -> str:
-    content = getattr(reply, "content", reply)
-    if isinstance(content, str):
-        return content
-    return "".join(str(block) for block in content or [])
+    """The answer alone: a reasoning model's thinking is dropped, not parsed.
+
+    A model served without a vLLM reasoning parser leaves its thinking inline in
+    <think> tags, and that thinking often rehearses JSON it then discards — so
+    feeding it to the verdict parser reads the draft instead of the answer.
+    """
+    answer, _thinking = answer_and_trace(reply)
+    return answer
 
 
 def _squash(text: str) -> str:
@@ -77,7 +82,7 @@ def assess(llm, name: str, text: str, topic: str = DEFAULT_TOPIC) -> dict | None
     for strict in (False, True):  # second pass only asks for stricter JSON
         if strict:
             prompt += "\n\nREMINDER: reply with ONLY the JSON object, no other text."
-        reply = _wait_out_rate_limit(llm.invoke, prompt)
+        reply = retry_transient(llm.invoke, prompt)
         data = parse_assessment(_reply_text(reply))
         if data:
             return normalize_assessment(data, text)
