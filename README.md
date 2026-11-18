@@ -149,6 +149,21 @@ tail -f logs/vllm-<jobid>.out    # prints the exact --base-url to use
 (The job's defaults — partition, GPU count, the venv holding vLLM — are set at
 the top of that file and will want matching to your Unity allocation.)
 
+For a single 32 GB card in an interactive session instead of an unattended
+batch job, `scripts/setup_vllm_32g.sh` allocates the session, builds the vLLM
+venv the first time, and serves:
+
+```bash
+scripts/setup_vllm_32g.sh        # from the login node; re-execs into srun --pty
+```
+
+32 GB does not hold `Qwen/Qwen3-32B` in bf16 — the weights alone are ~64 GB — so
+that script defaults to `Qwen/Qwen3-32B-AWQ`, the 4-bit build of the same model
+at ~18 GB, which leaves room for the KV cache at the 64k context `--agent`
+needs. Same family, so the reasoning and tool-call parsers are unchanged; just
+pass the served id to the client (`--model Qwen/Qwen3-32B-AWQ`). Set
+`MODEL=Qwen/Qwen3-8B` for an unquantized model on the same card.
+
 It runs, in effect:
 
 ```bash
@@ -384,6 +399,7 @@ document or per lookup instead of ending the run.
 cli.py             CLI entry point
 scripts/
   serve_vllm_unity.sbatch   start the vLLM server on Unity, with a reasoning parser
+  setup_vllm_32g.sh         same server in an interactive 32 GB GPU session, venv and all
 tb_search/
   config.py        Settings loaded from .env / environment: which local backend, which model
   reasoning.py     reasoning effort, and pulling a reply's thinking out of it
