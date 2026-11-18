@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-from tb_search.reasoning import EffortError, normalize_effort
+from tb_search.reasoning import normalize_effort
 
 # Qwen3 is the default because every piece this pipeline needs is supported for
 # it at once: vLLM serves it with a `qwen3` reasoning parser and with tool
@@ -153,7 +153,7 @@ def load_settings(**overrides) -> Settings:
 
     try:
         values["reasoning_effort"] = normalize_effort(values["reasoning_effort"])
-    except EffortError as e:
+    except ValueError as e:
         raise ConfigError(str(e)) from e
 
     if values["source"] == CUSTOM_SOURCE and not values["base_url"]:

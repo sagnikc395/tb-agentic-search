@@ -9,8 +9,9 @@ and the LLM only writes queries and scores records; it never names a paper.
 import re
 from dataclasses import dataclass, field
 
-from tb_search.assess import _reply_text, assess
+from tb_search.assess import assess
 from tb_search.prompts import QUERY_PROMPT
+from tb_search.reasoning import answer_text
 from tb_search.screening import retry_transient
 from tb_search.sources import Paper
 from tb_search.verdicts import parse_string_list
@@ -197,7 +198,7 @@ def generate_queries(
         return []
     taken = {query.lower() for query in used}
     queries = []
-    for query in parse_string_list(_reply_text(reply)):
+    for query in parse_string_list(answer_text(reply)):
         if query.lower() not in taken:
             taken.add(query.lower())
             queries.append(query)

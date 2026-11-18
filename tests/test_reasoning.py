@@ -1,15 +1,14 @@
 """The locally served model: backend settings, reasoning effort, captured traces."""
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from tb_search.config import ConfigError, Settings, load_settings
 from tb_search.prompts import RESISTANCE_PROMPT
 from tb_search.reasoning import (
-    EffortError,
     answer_and_trace,
     normalize_effort,
     reasoning_trace,
-    reply_text,
     split_thinking,
 )
 from tb_search.resistance import check_trace, normalize_prediction, predict
@@ -41,13 +40,9 @@ def clean_env(monkeypatch):
     monkeypatch.setattr("tb_search.config.load_dotenv", lambda *a, **k: None)
 
 
-class FakeReply:
+def FakeReply(content, additional_kwargs=None):
     """What langchain hands back: content, plus whatever it did not recognise."""
-
-    def __init__(self, content, additional_kwargs=None, response_metadata=None):
-        self.content = content
-        self.additional_kwargs = additional_kwargs or {}
-        self.response_metadata = response_metadata or {}
+    return AIMessage(content=content, additional_kwargs=additional_kwargs or {})
 
 
 class FakeLLM:
@@ -132,7 +127,7 @@ def test_normalize_effort(raw, expected):
 
 
 def test_normalize_effort_rejects_what_vllm_would_not_take():
-    with pytest.raises(EffortError):
+    with pytest.raises(ValueError):
         normalize_effort("very high")
 
 
@@ -217,11 +212,6 @@ def test_the_older_reasoning_content_spelling_still_reads():
     assert reasoning_trace(reply) == "thought"
 
 
-def test_reasoning_in_the_response_metadata_is_found_too():
-    reply = FakeReply("answer", {}, {"reasoning": {"content": "thought"}})
-    assert reasoning_trace(reply) == "thought"
-
-
 def test_a_reply_without_reasoning_yields_an_empty_trace():
     assert reasoning_trace(FakeReply("answer")) == ""
 
@@ -241,7 +231,9 @@ def test_thinking_cut_off_by_a_token_limit_is_still_captured():
 
 
 def test_content_blocks_are_joined():
-    assert reply_text(FakeReply([{"type": "text", "text": "ab"}, "c"])) == "abc"
+    """langchain-core joins them; this only pins that we lean on it."""
+    answer, _ = answer_and_trace(FakeReply([{"type": "text", "text": "ab"}, "c"]))
+    assert answer == "abc"
 
 
 def test_answer_and_trace_prefers_the_servers_own_separation():
