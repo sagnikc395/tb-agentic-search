@@ -34,7 +34,7 @@ def write_results(
 
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model": f"{settings.source}/{settings.model}",
+        "model": settings.label,
         "mode": mode,
         "input": str(input_path),
         "summary": counts,
@@ -124,7 +124,12 @@ def write_cohort(cohort, output: Path) -> None:
 
 
 def write_predictions(
-    rows: list[dict], scores: dict, model: str, drug: str, output: Path
+    rows: list[dict],
+    scores: dict,
+    model: str,
+    drug: str,
+    output: Path,
+    reasoning_effort: str | None = None,
 ) -> None:
     """JSON for a --predict run: every prediction with its variants and trace, plus scores."""
     payload = {
@@ -132,6 +137,9 @@ def write_predictions(
         "model": model,
         "mode": "predict",
         "drug": drug,
+        # Recorded because the traces are only comparable across runs at the
+        # same effort: it is what the model was asked to spend on thinking.
+        "reasoning_effort": reasoning_effort,
         "scores": scores,
         "predictions": rows,
     }
@@ -167,4 +175,16 @@ def write_predictions(
         f"ungrounded R calls {trace['ungrounded_resistant_calls']}, "
         f"tier-1 support {trace['tier1_support']})"
     )
+    captured = trace.get("thinking_captured")
+    if captured:
+        print(
+            f"  thinking: captured for {captured} of graded calls, "
+            f"median {trace.get('median_thinking_words')} words"
+        )
+    else:
+        print(
+            "  thinking: none captured — the traces are only what the model wrote "
+            "into its answer. Serve the model with a vLLM reasoning parser "
+            "(--reasoning-parser) to record its thinking too."
+        )
     print(f"\nSaved to {output}")

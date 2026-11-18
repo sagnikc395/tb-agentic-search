@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from tb_search.assess import _reply_text, assess
 from tb_search.prompts import QUERY_PROMPT
-from tb_search.screening import _wait_out_rate_limit
+from tb_search.screening import retry_transient
 from tb_search.sources import Paper
 from tb_search.verdicts import parse_string_list
 
@@ -104,7 +104,8 @@ HYDRATE_CAP = 300
 @dataclass
 class DiscoveryConfig:
     rounds: int = 2
-    # LLM assessments per round — the knob that sizes a run to a TPM budget.
+    # LLM assessments per round — the knob that sizes a run to the time
+    # and GPU hours it is worth.
     budget: int = 20
     max_papers: int = 10
     per_query: int = 25
@@ -190,7 +191,7 @@ def generate_queries(
         .replace("{N}", str(count))
     )
     try:
-        reply = _wait_out_rate_limit(llm.invoke, prompt)
+        reply = retry_transient(llm.invoke, prompt)
     except Exception as e:  # noqa: BLE001 - the graph routes still work without new queries
         print(f"  ! query generation failed: {e}", flush=True)
         return []
@@ -225,7 +226,9 @@ def discover(
 
     frontier = [seed] if seed else []
     queries = [keyword_query(seed.title if seed else query)]
-    queries += generate_queries(llm, topic[:1500], [], queries, config.queries_per_round)
+    queries += generate_queries(
+        llm, topic[:1500], [], queries, config.queries_per_round
+    )
 
     def lookup(action, argument, route: str, fresh: dict, round_number: int) -> None:
         """One source call; its papers join this round's fresh candidates."""

@@ -1,8 +1,18 @@
-"""Screen research documents for tuberculosis relevance with a Groq-backed LLM.
+"""Screen research documents and predict TB drug resistance with an LLM-backed agent.
 
-Two screening modes: light (default) makes one small LLM call per document,
-sized for a free Groq account; --agent runs the full Biomni A1 agent tool loop,
-which needs a Groq tier with a bigger tokens-per-minute budget.
+Every mode runs against a model you serve yourself: a vLLM job holding it, with
+this process (and biomni inside it) talking to that engine over HTTP. Start the
+server with a reasoning parser and --reasoning-effort is honoured and the
+model's thinking is recorded next to each prediction:
+
+    vllm serve Qwen/Qwen3-32B --reasoning-parser qwen3 \
+        --enable-auto-tool-choice --tool-call-parser hermes --port 8000
+    tb-search --predict rifampicin --base-url http://$NODE:8000/v1 \
+        --model Qwen/Qwen3-32B --reasoning-effort high
+
+Two screening modes: light (default) makes one small LLM call per document;
+--agent runs the full Biomni A1 agent tool loop, whose ~35k-token system prompt
+needs the server started with a context window to match.
 
 Separately, --search runs the discovery loop on a retrieval request — often one
 naming a seed paper by URL or DOI — and saves the related papers it finds;
@@ -23,7 +33,14 @@ from pathlib import Path
 from tb_search.assess import assess_documents
 from tb_search.catalogue import drug_key, known_drugs, panel_for
 from tb_search.cohort import DATA_DIR, CohortError, load_cohort
-from tb_search.config import DEFAULT_MODEL, ConfigError, load_settings
+from tb_search.config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    DEFAULT_SOURCE,
+    LOCAL_SOURCES,
+    ConfigError,
+    load_settings,
+)
 from tb_search.discovery import DiscoveryConfig, discover
 from tb_search.documents import EXCERPT_CHARS, collect_docs, resolve_input
 from tb_search.evaluate import (
@@ -31,6 +48,7 @@ from tb_search.evaluate import (
     evaluate_retrieval,
     evaluate_screening,
 )
+from tb_search.reasoning import EFFORTS
 from tb_search.report import (
     discovered_rows,
     write_cohort,
@@ -49,6 +67,17 @@ from tb_search.screening import (
 from tb_search.sources import SOURCE_NAMES, build_source
 
 
+def provider_options(args) -> dict:
+    """The provider flags shared by every mode, as load_settings overrides."""
+    return {
+        "model": args.model,
+        "temperature": args.temperature,
+        "base_url": args.base_url,
+        "reasoning_effort": args.reasoning_effort,
+        "source": args.source,
+    }
+
+
 def fail(message: str) -> int:
     """Report an error on stderr and return the CLI's exit code."""
     print(message, file=sys.stderr)
@@ -58,7 +87,8 @@ def fail(message: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tb-search",
-        description="Detect TB-related research documents with a biomni-powered LLM on Groq.",
+        description="Screen TB literature and predict drug resistance from VCFs "
+        "with a biomni-powered LLM, served locally with vLLM or Ollama.",
     )
     parser.add_argument(
         "input",
@@ -177,13 +207,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="[--predict] Also use variants the caller did not mark PASS.",
     )
     parser.add_argument(
-        "--model", help=f"Groq model id (default: $GROQ_MODEL or {DEFAULT_MODEL})."
+        "--model",
+        help="Model id to request: on vLLM the id the server was started with, "
+        "on Ollama the pulled tag "
+        f"(default: $VLLM_MODEL or {DEFAULT_MODEL}).",
+    )
+    parser.add_argument(
+        "--base-url",
+        metavar="URL",
+        help="Where the model is served — the vLLM job's URL, e.g. "
+        f"http://gpu042:8000/v1 (default: $VLLM_BASE_URL or {DEFAULT_BASE_URL}). "
+        "This is biomni's Custom source, which the A1 agent takes too, so "
+        "--agent does its tool calling against that same server.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        metavar="LEVEL",
+        choices=EFFORTS,
+        help="Reasoning effort sent with every request: "
+        f"{', '.join(EFFORTS)}. vLLM maps it onto the chat template's thinking "
+        "switch, so it sets how much reasoning the captured traces are made of "
+        "(default: $LLM_REASONING_EFFORT, else the server's own default).",
+    )
+    parser.add_argument(
+        "--source",
+        choices=LOCAL_SOURCES,
+        help="Which biomni backend serves the model: Custom (any "
+        "OpenAI-compatible server, i.e. vLLM) or Ollama "
+        f"(default: $LLM_SOURCE or {DEFAULT_SOURCE}). Both drive the A1 agent.",
     )
     parser.add_argument(
         "--agent",
         action="store_true",
         help="Use the full biomni A1 agent loop instead of small per-doc LLM calls. "
-        "A1's system prompt is large; a free Groq account will be rate limited.",
+        "A1's system prompt is ~35k tokens, so serve the model with a context "
+        "window well past that and with tool calling enabled.",
     )
     parser.add_argument(
         "--batch-size",
@@ -220,11 +278,11 @@ def run_discovery(args, output: Path | None) -> int:
     """--search and --eval-retrieval: the discovery loop."""
     request = args.search or args.eval_retrieval
     try:
-        settings = load_settings(model=args.model, temperature=args.temperature)
+        settings = load_settings(**provider_options(args))
         check_connection(settings)
     except ConfigError as e:
         return fail(e)
-    llm, model = build_screener(settings), f"{settings.source}/{settings.model}"
+    llm, model = build_screener(settings), settings.label
 
     config = DiscoveryConfig(
         rounds=max(1, args.rounds),
@@ -300,7 +358,7 @@ def run_predict(args, output: Path | None) -> int:
         return fail(f"No isolate has both a VCF and a {drug} phenotype.")
 
     try:
-        settings = load_settings(model=args.model, temperature=args.temperature)
+        settings = load_settings(**provider_options(args))
         check_connection(settings)
     except ConfigError as e:
         return fail(e)
@@ -309,7 +367,7 @@ def run_predict(args, output: Path | None) -> int:
     print(
         f"Predicting {drug} resistance for {len(samples)} isolate(s) "
         f"({counts['R']} R, {counts['S']} S) "
-        f"[{settings.source} {settings.model}]"
+        f"[{settings.description}]"
     )
     print(f"  panel: tier 1 {', '.join(panel.tier1) or 'none'}", end="")
     print(f"; tier 2 {', '.join(panel.tier2) or 'none'}" if panel.tier2 else "")
@@ -334,9 +392,10 @@ def run_predict(args, output: Path | None) -> int:
     write_predictions(
         rows,
         scores,
-        f"{settings.source}/{settings.model}",
+        settings.label,
         drug,
         output or Path(f"tb_resistance_{drug}.json"),
+        reasoning_effort=settings.reasoning_effort,
     )
     return 0
 
@@ -358,8 +417,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = load_settings(
-            model=args.model,
-            temperature=args.temperature,
+            **provider_options(args),
             use_tool_retriever=args.tools or None,
             load_data_lake=args.data_lake or None,
         )
@@ -370,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         max_papers = max(1, args.max_papers)
         print(
             f"Searching for up to {max_papers} paper(s) "
-            f"[A1 agent, {settings.source} {settings.model}]\n"
+            f"[A1 agent, {settings.description}]\n"
             f"  query: {args.search}\n"
         )
         try:
@@ -380,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ConfigError as e:
             return fail(e)
-        write_papers(rows, f"{settings.source}/{settings.model}", args.search, output)
+        write_papers(rows, settings.label, args.search, output)
         return 0
 
     input_path = resolve_input(args.input)
@@ -402,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"Screening {len(docs)} document(s) under {input_path} "
-        f"[mode: {mode}, {settings.source} {settings.model}]\n"
+        f"[mode: {mode}, {settings.description}]\n"
     )
 
     try:

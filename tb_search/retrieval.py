@@ -5,11 +5,12 @@ import re
 from contextlib import redirect_stdout
 
 from tb_search.prompts import RETRIEVAL_PROMPT
-from tb_search.screening import _is_rate_limit_error, _wait_out_rate_limit
+from tb_search.screening import is_transient_error, retry_transient
 from tb_search.verdicts import parse_paper_list
 
-RATE_LIMIT_HINT = (
-    "    hint: A1's system prompt is huge; a free Groq tier will be rate limited"
+CONTEXT_HINT = (
+    "    hint: A1's system prompt is ~35k tokens; serve the model with a larger "
+    "--max-model-len"
 )
 
 # A1 calls its retrieval tools as python inside <execute> blocks, so the
@@ -77,11 +78,11 @@ def retrieve_papers(
     prompt = RETRIEVAL_PROMPT.replace("{N}", str(max_papers)).replace("{QUERY}", query)
 
     try:
-        answer = _wait_out_rate_limit(_run_streamed, agent, prompt, verbose)
+        answer = retry_transient(_run_streamed, agent, prompt, verbose)
     except Exception as e:  # noqa: BLE001 - a dead agent run must not stop the CLI
         print(f"  ! agent run failed: {e}", flush=True)
-        if _is_rate_limit_error(e):
-            print(RATE_LIMIT_HINT, flush=True)
+        if not is_transient_error(e):
+            print(CONTEXT_HINT, flush=True)
         answer = ""
 
     rows = parse_paper_list(answer or "")
@@ -89,7 +90,7 @@ def retrieve_papers(
         # One retry, with a sterner reminder.
         print("  no paper list in the reply; retrying once", flush=True)
         try:
-            answer = _wait_out_rate_limit(
+            answer = retry_transient(
                 _run_streamed,
                 agent,
                 prompt + "\n\nREMINDER: reply with ONLY the JSON list, no other text.",
