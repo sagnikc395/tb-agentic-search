@@ -1,63 +1,12 @@
-# Used when a document is screened on its own rather than against a seed paper.
-DEFAULT_TOPIC = (
-    "Tuberculosis and Mycobacterium tuberculosis research: drug resistance, "
-    "genomics and variant interpretation, diagnostics, treatment."
-)
+"""The task prompts handed to the A1 agent.
 
-ASSESS_PROMPT = """You are a literature screener for a tuberculosis research project.
-Assess the document below against the TOPIC. Judge only by the text shown.
-
-Reply with exactly one JSON object and nothing else:
-
-{"relevance": 2, "tb_central": true, "paper_type": "method", "organism": "Mycobacterium tuberculosis", "drugs": ["rifampicin"], "genes_variants": ["rpoB S450L"], "methods": ["CNN"], "datasets": ["CRyPTIC"], "evidence": "verbatim quote from the text", "abstain": false, "reason": "short justification"}
-
-- relevance: 3 = same question, method or dataset as the topic; 2 = clearly
-  useful to it; 1 = tangential; 0 = unrelated.
-- tb_central: true only when TB or M. tuberculosis is a central subject. A
-  passing mention does not count.
-- paper_type: one of method, benchmark, dataset, review, clinical, agent, other.
-- drugs, genes_variants, methods, datasets: only items named in the text; use
-  [] when there are none.
-- evidence: one sentence copied word for word from the text that best supports
-  your relevance score, under 40 words.
-- abstain: true when the text is too thin to judge (e.g. a title with no
-  abstract). Do not guess.
-- reason: under 20 words.
-
-TOPIC:
-
-{TOPIC}
-
-DOCUMENT ("{name}"):
-
----
-{DOC}
----
+Biomni's A1 brings its own ~35k-token system prompt — who it is, the tool
+catalogue, the <execute>/<solution> protocol — but no task prompts, because
+A1's design is that the caller supplies the task in `agent.go(...)`. These are
+those tasks: what to judge, the domain rules to judge it by, and the JSON shape
+the reply has to come back in so it can be parsed, normalized and checked
+rather than taken on trust.
 """
-
-QUERY_PROMPT = """You are planning literature searches for a tuberculosis research project.
-
-TOPIC:
-
-{TOPIC}
-
-Relevant papers found so far:
-{FOUND}
-
-Queries already used:
-{USED}
-
-Write {N} new search queries that would surface related papers the earlier
-queries missed. Each query takes a different angle: the scientific question,
-the method, the dataset, or a specific drug or gene. Each query is 2 to 5
-plain keywords, with no boolean operators and no quotes. Do not repeat or
-lightly reword a used query.
-
-Reply with exactly one JSON list of strings and nothing else:
-
-["keywords one", "keywords two"]
-"""
-
 
 BATCH_SCREEN_PROMPT = """You are a literature screener for a tuberculosis research project.
 For each numbered document below, decide whether it is fundamentally about
@@ -66,16 +15,20 @@ tuberculosis (TB) or Mycobacterium tuberculosis.
 A document is TB-related when TB or M. tuberculosis is a central subject or a
 core component of the work — e.g. diagnosing TB, its drug resistance, or a
 genomic/variant database built around it. A passing mention of TB does not
-count. Judge each document by its excerpt.
+count. Judge each document by its excerpt; do not search for the paper.
 
 Reply with exactly one JSON list, one object per document id, nothing outside it:
 
 ```json
-[{"id": 0, "tb_related": true, "confidence": "high", "reason": "short justification"}]
+[{"id": 0, "tb_related": true, "confidence": "high", "evidence": "verbatim quote from the excerpt", "reason": "short justification"}]
 ```
 
-Use a boolean for tb_related, one of high/medium/low for confidence, and keep
-reasons under 20 words. Mark borderline calls with confidence "low".
+- tb_related: a boolean.
+- confidence: one of high/medium/low. Mark borderline calls "low".
+- evidence: one sentence copied word for word from that document's excerpt that
+  best supports your verdict, under 40 words. Use "" if the excerpt is too thin
+  to quote.
+- reason: under 20 words.
 
 DOCUMENTS:
 
@@ -118,7 +71,8 @@ RESISTANCE_PROMPT = """You are a tuberculosis molecular-resistance analyst.
 Given the variants called in one Mycobacterium tuberculosis isolate, predict
 whether it is phenotypically resistant to {DRUG}.
 
-Reason only from the variants listed. Genomic coordinates are H37Rv
+Reason only from the variants listed — everything you need is in this prompt,
+so do not search or run code to look anything up. Genomic coordinates are H37Rv
 (NC_000962.3). Codon numbers and promoter offsets are already resolved for you.
 
 Genes graded for {DRUG}:

@@ -5,23 +5,20 @@
 ![flow-3](./assets/v2-3.png)
 ![relevance_check](./assets/paper_relevance_check.png)
 
-Three capabilities, with every LLM call going through
-[Biomni](https://github.com/snap-stanford/Biomni) to a model you serve yourself
-— vLLM on the cluster, or Ollama locally (see
+Three capabilities, each one a run of the
+[Biomni](https://github.com/snap-stanford/Biomni) A1 agent against a model you
+serve yourself — vLLM on the cluster, or Ollama locally (see
 [Serving the model](#serving-the-model-vllm-on-unity)). No hosted API, no key.
 
 - **Retrieval** (`--search`) — give it a request such as "find me relevant papers
-  like this paper <paper-url>". It resolves the seed paper on Europe PMC,
-  Semantic Scholar or Crossref, gathers candidates from the seed's references,
-  the papers citing it and keyword searches, and has the LLM score them. Papers
-  it accepts seed the next round, and in this default path every returned paper
-  comes straight from a source API, so none can be invented. `--agent` swaps the
-  small per-paper calls for the Biomni A1 agent, whose own tool calls do the
-  retrieval.
+  like this paper <paper-url>". A1 resolves the seed paper and searches for
+  related work with its own retrieval tools (`query_pubmed`, `query_arxiv`,
+  `query_scholar`, `search_google`, `extract_url_content`), and the paper list
+  is read out of its reply.
 - **Screening** — hand it a folder of documents (PDF or plain text) and it
-  returns an assessment per document: `tb_related`, a 0–3 `relevance`, paper
-  type, drugs, genes/variants, methods, datasets, and an `evidence` quote that
-  is checked against the text (`evidence_verified`).
+  returns a verdict per document: `tb_related`, a confidence, a reason, and an
+  `evidence` quote that is checked against the excerpt the agent was shown
+  (`evidence_verified`).
 - **Resistance prediction from VCFs** (`--cohort`, `--predict`) — ingest the
   BIG-TB isolate VCFs, and for a given drug predict `resistant` /
   `not_resistant` / `unknown` with a reasoning trace. Calls are scored against
@@ -31,15 +28,13 @@ Three capabilities, with every LLM call going through
 Serving the model ourselves is what makes the reasoning traces usable: a vLLM
 server started with a reasoning parser returns the model's thinking separated
 from its answer, and every prediction stores that trace verbatim beside the
-variants it was shown. It is also what gives the A1 agent a tool-calling
-backend that costs GPU hours rather than per-token billing.
+variants it was shown. It is also what gives A1 a tool-calling backend that
+costs GPU hours rather than per-token billing.
 
-Screening has two modes:
-
-- **light** (default) — one small LLM call per document (~1.5k tokens).
-- **`--agent`** — the full Biomni A1 agent tool loop. A1's system prompt is
-  ~35k tokens, so the server needs a context window well past that
-  (`--max-model-len 65536`) and tool calling enabled.
+A1's system prompt is ~35k tokens and rides on every step of every run, so the
+server has to be started with a context window well past that
+(`--max-model-len 65536`) and with tool calling enabled. That is the one hard
+requirement this design buys: there is no small-call fallback path.
 
 ## Setup
 
@@ -48,13 +43,10 @@ uv sync
 cp .env.example .env   # optional: everything in it has a default
 ```
 
-Every mode needs a model server to call, and nothing in `.env` is required to
-reach one: the defaults are `Qwen/Qwen3-8B` at `http://localhost:8000/v1`, so
-`--base-url` (or `VLLM_BASE_URL`) is all that changes when the server lives on
-a compute node. `SEMANTIC_SCHOLAR_API_KEY` and `CROSSREF_MAILTO` are optional:
-both sources
-answer without them, only slower (`CROSSREF_MAILTO` is just an email address and
-puts requests in Crossref's faster "polite" pool).
+Every mode but `--cohort` needs a model server to call, and nothing in `.env`
+is required to reach one: the defaults are `Qwen/Qwen3-8B` at
+`http://localhost:8000/v1`, so `--base-url` (or `VLLM_BASE_URL`) is all that
+changes when the server lives on a compute node.
 
 ## Resistance prediction from VCFs
 
@@ -126,7 +118,7 @@ server hand back the model's thinking as its own field instead of leaving it
 mixed into the answer.
 
 Biomni has two backends that serve a model locally, and both drive the A1
-agent, so `--agent` works either way:
+agent:
 
 | `--source` | what it is | reasoning traces |
 | --- | --- | --- |
@@ -158,7 +150,7 @@ scripts/setup_vllm_32g.sh        # from the login node; re-execs into srun --pty
 ```
 
 `Qwen/Qwen3-8B` in bf16 is ~16 GB of weights, so a single 32 GB card holds it
-with room left for the KV cache at the 64k context `--agent` needs — which is
+with room left for the KV cache at the 64k context A1 needs — which is
 why it is the default everywhere rather than a fallback, and why one GPU is
 enough for every mode. For a larger model on the same card,
 `MODEL=Qwen/Qwen3-32B-AWQ` is the 4-bit build of the 32B at ~18 GB: the same
@@ -179,7 +171,7 @@ vllm serve Qwen/Qwen3-8B --port 8000 \
 docs](https://docs.vllm.ai/en/stable/features/reasoning_outputs/)); the parser
 name has to match the model family. `--enable-auto-tool-choice` is what lets
 the A1 agent do its tool calling against this server, and `--max-model-len` has
-to clear A1's ~35k-token system prompt for `--agent` to work at all.
+to clear A1's ~35k-token system prompt for anything to work at all.
 
 Then point any mode at it. biomni runs here, in this process, and knows the
 inference engine only by URL:
@@ -193,12 +185,13 @@ uv run cli.py --predict rifampicin --limit 40 --balance \
 # from a laptop, through a tunnel: ssh -N -L 8000:gpu042:8000 unity.rc.umass.edu
 uv run cli.py --predict isoniazid --base-url http://localhost:8000/v1 ...
 
-# the A1 agent tool loop against the same server
-uv run cli.py --search "papers like <url>" --agent --base-url http://gpu042:8000/v1
+# a retrieval run against the same server
+uv run cli.py --search "papers like <url>" --base-url http://gpu042:8000/v1
 ```
 
-`--base-url` is biomni's `Custom` source for the plain per-call screener and
-for the A1 agent alike, and no API key is involved. Before anything else runs,
+`--base-url` is biomni's `Custom` source, which A1 takes too, so the agent's
+own tool calling runs against that same server; no API key is involved.
+Before anything else runs,
 the endpoint is pinged and its model list checked, so a job that has not come up
 yet — or a model id that is not the one being served — fails immediately
 instead of mid-run (`--source Ollama` is checked the same way, against
@@ -224,6 +217,14 @@ With `reasoning_content` being the field's older spelling, and langchain's
 `ChatOpenAI` dropping both as non-standard, `tb_search/screening.py` subclasses
 it to keep them — otherwise the traces never reach us at all.
 
+A1 makes that harder than a plain chat call does. Its `generate` step rebuilds
+every reply as a fresh `AIMessage`, so `additional_kwargs` — and the
+`reasoning` field with it — is gone by the time the step reaches the agent's
+graph state. So the subclass also appends each trace to a list that
+`build_agent` hands it, and `run_agent` reads that list back per run: the whole
+run's thinking, step by step, which with a tool loop in the middle is what the
+answer was actually reasoned from.
+
 ## Usage
 
 **Screening local documents**
@@ -232,50 +233,45 @@ it to keep them — otherwise the traces never reach us at all.
 uv run cli.py                        # screens ./papers, or ../papers when ./papers is absent
 uv run cli.py ../papers               # any directory or single PDF/text file
 uv run cli.py -o out.json             # default output: tb_verdicts.json
-uv run cli.py --agent                 # full A1 agent loop instead (needs a big context window)
+uv run cli.py --batch-size 1          # one document per agent run, for a tight context window
 uv run cli.py --gold eval/screening_gold.json   # plus accuracy against hand labels
 ```
+
+Documents go to the agent `--batch-size` at a time, as section-aware excerpts
+(the opening, plus the starts of the methods and closing sections — the opening
+alone cannot tell a TB methods paper from one that names TB in passing). A batch
+whose reply will not parse is retried once with a stricter reminder, then left
+as `unknown`, so one bad agent run cannot end a pass over a whole directory.
 
 **Retrieval**
 
 ```bash
 uv run cli.py --search "find me relevant papers like this paper https://www.biorxiv.org/content/..."
-uv run cli.py --search "..." -n 20 -o found.json        # at most 20 papers, most relevant first
-uv run cli.py --search "..." --sources europepmc        # one literature source only
-uv run cli.py --search "..." --sources semanticscholar,crossref
-uv run cli.py --search "..." --rounds 3 --budget 10     # more rounds, fewer LLM calls per round
-uv run cli.py --search "..." --agent --verbose          # the Biomni A1 agent instead
+uv run cli.py --search "..." -n 20 -o found.json   # at most 20 papers
+uv run cli.py --search "..." --verbose             # biomni's full step-by-step agent output
 ```
 
-Candidates are ranked by structure, not by text: a paper reached by several
-routes (both reference lists and a keyword search, say) is scored before one a
-single search turned up. The LLM then gives it the 0–3 relevance.
-
-**Evaluation**
-
-```bash
-uv run cli.py --eval-retrieval "https://www.biorxiv.org/content/..."
-uv run cli.py --eval-retrieval "https://..." --sources europepmc   # score one source
-```
-
-A search run echoes each lookup as it goes (the round number in brackets),
-then each assessed paper with its 0–3 relevance, then the papers it settled on:
+A retrieval run echoes the agent's searches as it makes them (the step number in
+brackets), then the papers it settled on:
 
 ```
-Searching [2 round(s), Custom/Qwen/Qwen3-8B]
+Searching for up to 10 paper(s) [A1 agent, Custom Qwen/Qwen3-8B @ http://gpu042:8000/v1]
   query: find me relevant papers like this paper https://...
 
-  seed: BIG-TB: A benchmark for ... (2026) [PPR:PPR1226747]
-  [1] cited-by:PPR:PPR1226747 -> 53
-  [1] search:rifampicin katG mutation -> 25
-  [1] [3] Benchmarking the translational potential of AI-based drug-resistance ...
-  [1] 148 new candidates, 8 judged, 4 accepted
+  [2] extract_url_content(https://www.biorxiv.org/content/...)
+  [4] query_pubmed(rifampicin resistance prediction whole genome sequencing)
+  [6] query_scholar(tuberculosis drug resistance benchmark)
+  [8] agent wrote up its answer
 
 Papers related to the query (8):
-   1. TB-Bench: A Systematic Benchmark of ... (2026) [europepmc]
+   1. TB-Bench: A Systematic Benchmark of ... (2026) [pubmed]
       https://doi.org/10.64898/2026.04.08.717138
       Provides a TB drug resistance benchmark similar to BIG-TB.
 ```
+
+Every row has to carry a title the agent actually returned, and the agent is
+told never to invent one — but unlike a search against a source API directly,
+nothing here can *prove* a row came from a real record. Spot-check the links.
 
 ## Architecture
 
@@ -288,11 +284,11 @@ touching the code.
 
 ```mermaid
 flowchart TB
-    subgraph ext["literature sources — HTTPS, read-only"]
+    subgraph ext["the web — reached by A1's own tools"]
         direction LR
-        EPMC["Europe PMC"]
-        S2["Semantic Scholar"]
-        CR["Crossref"]
+        PM["PubMed / arXiv"]
+        SCH["Scholar / Google"]
+        URL["the seed paper's page"]
     end
 
     subgraph disk["local data — read off disk, no network"]
@@ -307,12 +303,12 @@ flowchart TB
         CFG["config.load_settings<br/>→ Settings; a hosted source<br/>is refused here, not later"]
         CHK["screening.check_connection<br/>the server answers, with this model"]
 
-        SCREEN["<b>screening</b> (default)<br/>documents → assess → verdicts"]
-        SEARCH["<b>--search</b> / <b>--eval-retrieval</b><br/>sources → discovery → assess"]
+        SCREEN["<b>screening</b> (default)<br/>documents → excerpts → verdicts"]
+        SEARCH["<b>--search</b><br/>retrieval request → paper rows"]
         COHORT["<b>--cohort</b><br/>cohort join — no model calls"]
         PREDICT["<b>--predict</b><br/>cohort → vcf → genome → catalogue<br/>→ resistance: call + graded trace"]
 
-        MODEL["the single model object for the run<br/><b>build_screener</b> → ReasoningChatOpenAI<br/><b>build_agent</b> → biomni A1 (--agent)"]
+        MODEL["<b>build_agent</b> → biomni A1<br/>the one model object for the run;<br/>agent.llm swapped for the<br/>reasoning-keeping ChatOpenAI"]
         REPORT["evaluate.py + report.py<br/>scores, console summary, JSON"]
     end
 
@@ -322,7 +318,7 @@ flowchart TB
 
     CLI --> CFG --> CHK
     CHK --> SCREEN & SEARCH & COHORT & PREDICT
-    SEARCH <-->|"sources.py"| ext
+    MODEL <-->|"A1's tools, run as code"| ext
     PREDICT -->|"vcf.py, genome.py"| disk
     COHORT --> disk
     SCREEN --> MODEL
@@ -340,10 +336,10 @@ flowchart TB
 
 The layering is deliberate in three places:
 
-- **Biomni sits at the model boundary, not around the pipeline.** It supplies
-  the chat model and, under `--agent`, the A1 tool loop. Every prompt, every
-  source client, the VCF reader and all the grading are this repo's (see [How it
-  uses Biomni](#how-it-uses-biomni)).
+- **Biomni supplies the agent; the pipeline around it is this repo's.** A1
+  brings the tool loop, the tool catalogue and its own ~35k-token system
+  prompt. Every task prompt, the VCF reader and all the grading are this
+  repo's (see [How it uses Biomni](#how-it-uses-biomni)).
 - **The genomic layer is pure and offline.** `vcf.py`, `genome.py` and
   `catalogue.py` turn a VCF into named, panel-filtered variants with no model
   in the loop, which is why `tests/` can cover them without a server.
@@ -352,50 +348,44 @@ The layering is deliberate in three places:
 
 ## How a run flows
 
-Both modes enter through `cli.py`, which parses flags, loads `Settings` from
-`.env` and picks a path. Everything below the CLI is plain Python. In the
-default paths the model only plans queries and judges text; under `--agent` it
-also drives the retrieval tools and its reply is parsed into rows.
+Every mode enters through `cli.py`, which parses flags, loads `Settings` from
+`.env` and picks a path. Everything below the CLI is plain Python, and every
+model call is `run_agent` — one `agent.go()` over one task prompt.
 
 **Screening (the default mode)**
 
 ```
-cli.py
-  load_settings          config.py      .env -> Settings
-  resolve_input          documents.py   the directory or single file to read
-  collect_docs           documents.py   every PDF/text under it
-  check_connection       screening.py   the server's model list + a 1-token call, so a server that is down fails here
-  build_screener         screening.py   biomni.llm.get_llm -> chat model
-  assess_documents       assess.py      one model call per document
-    section_excerpt      documents.py   opening + methods + conclusion
-    assess               assess.py      ASSESS_PROMPT -> one JSON object
-    parse_assessment     verdicts.py    salvage that JSON from prose or code fences
-    normalize_assessment assess.py      quote checked against the text, facets, abstention
-  write_results          report.py      console lines + tb_verdicts.json
+cli.py run_screening
+  load_settings            config.py      .env -> Settings
+  resolve_input            documents.py   the directory or single file to read
+  collect_docs             documents.py   every PDF/text under it
+  check_connection         screening.py   the server's model list + a 1-token call, so a server that is down fails here
+  build_agent              screening.py   biomni.agent.A1, wired to our server
+  classify_documents_agent screening.py   one agent run per --batch-size documents
+    section_excerpt        documents.py   opening + methods + conclusion
+    BATCH_SCREEN_PROMPT    prompts.py     the listing -> one JSON list
+    run_agent              screening.py   agent.go, plus the run's thinking
+    parse_verdict_list     verdicts.py    salvage that JSON from prose or code fences
+    quote_in_text          verdicts.py    the evidence quote checked against the excerpt
+  write_results            report.py      console lines + tb_verdicts.json
 ```
 
-**Retrieval (`--search`, and `--eval-retrieval` which wraps it)**
+**Retrieval (`--search`)**
 
 ```
-cli.py run_discovery
-  build_source           sources.py     Europe PMC / Semantic Scholar / Crossref, or Combined
-  discover               discovery.py   repeats --rounds times:
-    source.resolve       sources.py     seed paper from a URL/DOI; with no link, the query is the topic
-    generate_queries     discovery.py   the LLM writes 3 queries, each from a different angle
-    lookup               sources.py     references + citations of the frontier, then every query,
-                                        sent to every selected source and merged by DOI
-    source.hydrate       sources.py     batch-fetch the abstracts
-    rank                 discovery.py   by Candidate.support: routes that reached it, then citations
-    assess               assess.py      the top --budget papers, 0-3 relevance, 2+ accepted
-    next round           discovery.py   the top 5 accepted papers seed the next round
-  discovered_rows        report.py      rows -> tb_papers.json
+cli.py run_search
+  build_agent            screening.py   as above
+  retrieve_papers        retrieval.py   one agent run on the request
+    RETRIEVAL_PROMPT     prompts.py     fetch the seed, then search; reply as a JSON list
+    go_stream            biomni         step by step, so the searches can be echoed
+    _searches            retrieval.py   the tool calls, read back out of the code A1 wrote
+    parse_paper_list     verdicts.py    salvage the rows from the final reply
+  write_papers           report.py      rows -> tb_papers.json
 ```
 
-`--agent` replaces the model step, not the pipeline: screening hands document
-batches to A1, and `--search --agent` runs A1 once and reads the paper list out
-of its reply (`retrieval.py`). `--eval-retrieval` wraps `discover()`: it hides
-the seed's reference list, runs the same loop, and reports recall@10/25/50/100
-against that list (`evaluate.py`).
+`--predict` is the same shape per isolate: the VCF is read and named offline,
+`RESISTANCE_PROMPT` hands the agent the numbered variant list, and the reply is
+parsed, normalized and then checked against what was in that list.
 
 ## The lifecycle of one request
 
@@ -409,22 +399,22 @@ flowchart TB
         L1["config.load_settings<br/>.env + flags → Settings"]
         L2["screening.check_connection<br/>the model list, then a 1-token call:<br/>a server that is down, or serving a<br/>different id, fails here"]
         L3["screening._prime_environment<br/>BIOMNI_CUSTOM_BASE_URL / _API_KEY,<br/>where biomni's own code looks"]
-        L4["build_screener — or build_agent<br/>one model object for the whole run"]
+        L4["build_agent<br/>one A1 agent for the whole run;<br/>agent.reasoning_traces attached"]
         L1 --> L2 --> L3 --> L4
     end
 
     subgraph percall["per document, per candidate paper, per isolate"]
-        P1["prompt built — prompts.py<br/>a section excerpt (documents.py), a<br/>variant listing (resistance.py), or<br/>the query-writing prompt"]
-        P2["reasoning.apply_reasoning_effort<br/>reasoning_effort rides on the request"]
-        P3["screening.retry_transient<br/>POST /v1/chat/completions"]
+        P1["task prompt built — prompts.py<br/>a batch of section excerpts, a numbered<br/>variant listing, or the retrieval request"]
+        P2["screening.run_agent<br/>agent.go — A1's tool loop, its ~35k-token<br/>system prompt on every step"]
+        P3["screening.retry_transient<br/>POST /v1/chat/completions, per step"]
         P4["vLLM<br/>prefill → decode; the reasoning parser<br/>splits the thinking out of the answer"]
-        P5["reasoning.answer_and_trace<br/>(answer, trace) — langchain drops that<br/>field as non-standard, so the ChatOpenAI<br/>subclass keeps it; on Ollama it comes<br/>out of the model's think tags instead"]
-        P6["verdicts.parse_assessment<br/>or resistance.parse_prediction<br/>the JSON, out of prose or code fences"]
-        P7["normalize_assessment — assess.py<br/>facets coerced, the evidence quote<br/>checked against the text, abstention<br/><br/>normalize_prediction — resistance.py<br/>the call folded to one of three"]
+        P5["(answer, trace) — langchain drops that<br/>field as non-standard and A1 rebuilds the<br/>message, so the ChatOpenAI subclass files<br/>each trace in agent.reasoning_traces;<br/>on Ollama it comes out of the think tags"]
+        P6["verdicts.parse_verdict_list<br/>or resistance.parse_prediction<br/>the JSON, out of prose, fences or solution tags"]
+        P7["verdicts.quote_in_text — screening<br/>the evidence quote checked against the excerpt<br/><br/>normalize_prediction — resistance.py<br/>the call folded to one of three"]
         P8["resistance.check_trace<br/>variants_resolve, genes_on_panel,<br/>call_grounded, tier1_support"]
         P9["one row, always"]
         P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8 --> P9
-        RETRY["a busy or restarting server:<br/>retried twice. a context-length<br/>failure: not retried, it would repeat"]
+        RETRY["a busy or restarting server:<br/>retried twice. a context-length<br/>failure: not retried, it would repeat —<br/>cut --batch-size or raise --max-model-len"]
         P3 -.-> RETRY -.-> P3
         P6 -.->|"unreadable VCF, failed call,<br/>unparseable reply → a row<br/>carrying an error, so one bad<br/>input cannot end a sweep"| P9
     end
@@ -443,25 +433,29 @@ flowchart TB
     class P4 remote
 ```
 
-Under `--agent` the middle of that stack changes shape: one `agent.go()` or
-`go_stream()` becomes however many requests A1's tool loop needs, each carrying
-its ~35k-token system prompt, and the final reply is parsed into rows the same
-way. The setup and the checks on either side are unchanged.
+One `agent.go()` is however many requests A1's tool loop needs, each carrying
+that system prompt, so the per-item cost is set by how many steps the agent
+takes rather than by the task prompt's length. `--tools` lets A1 retrieve a
+relevant tool subset instead of carrying the whole catalogue, which is the one
+lever on that cost short of a smaller prompt.
 
 ## How it uses Biomni
 
-Biomni supplies the model and the optional agent; the pipeline around them is
-this repo's, including every prompt (`prompts.py`). The touchpoints are few:
+Biomni supplies the agent; the pipeline around it is this repo's, including
+every task prompt (`prompts.py`). A1 brings its own system prompt — who it is,
+the tool catalogue, the `<execute>`/`<solution>` protocol — but no task prompts,
+because its design is that the caller supplies the task in `agent.go(...)`.
+The touchpoints are few:
 
 | Biomni piece | Where | Used for |
 | --- | --- | --- |
-| `biomni.llm.get_llm` | `screening._chat_model` | the chat model on the Ollama branch; an OpenAI-compatible server is built here instead, so the reasoning field survives |
-| `biomni.config.default_config` | `build_screener`, `build_agent` | temperature, model and provider; A1 forwards `llm`/`source` but not `temperature` |
-| `biomni.agent.A1` | `screening.build_agent` | the `--agent` path: tool loop, tool retriever, data-lake switch |
-| `agent.go(prompt)` | `screening.classify_documents_agent` | screening in batches of `--batch-size` documents |
+| `biomni.agent.A1` | `screening.build_agent` | the one model object: tool loop, tool retriever, data-lake switch |
+| `biomni.config.default_config` | `screening.build_agent` | temperature, model and provider; A1 forwards `llm`/`source` but not `temperature` |
+| `agent.go(prompt)` | `screening.run_agent` | every task: screening batches, and one resistance prediction per isolate |
 | `agent.go_stream(prompt)` | `retrieval._run_streamed` | search step by step, so its tool calls can be echoed |
+| A1's retrieval tools | the `--search` run | `query_pubmed`, `query_arxiv`, `query_scholar`, `search_google`, `extract_url_content`, called as code inside `<execute>` |
 
-Five details are easy to get wrong, which is why the code spells them out:
+Six details are easy to get wrong, which is why the code spells them out:
 
 - The source is always passed explicitly. Biomni's auto-detection sees the
   slash in a HuggingFace id like `Qwen/Qwen3-8B` and would route it to Ollama
@@ -477,12 +471,17 @@ Five details are easy to get wrong, which is why the code spells them out:
   tens-of-GB data-lake download; `--data-lake` turns it back on.
 - `timeout_seconds` comes from `BIOMNI_TIMEOUT_SECONDS` (default 600) and is
   passed only to A1.
+- A1's `generate` step appends a **new** `AIMessage` built from the reply's text,
+  so `additional_kwargs` never reaches the graph state and `go()` hands back a
+  bare string. The reasoning is therefore collected at the chat model, in
+  `agent.reasoning_traces`, and `run_agent` clears that list per run so one
+  isolate's thinking is not filed under the next.
 
-A1's system prompt is ~35k tokens, against ~1.5k for one light screening call,
-so the default paths avoid A1 entirely: a sweep over thousands of isolates is
-not worth 20x the prefill. Where a call can still fail, `retry_transient`
-retries a busy or restarting server twice, and a failure is reported per
-document or per lookup instead of ending the run.
+That system prompt rides on every step of every run, so the per-item cost is
+real: a sweep over thousands of isolates pays it thousands of times, and
+`--tools` (a retrieved tool subset) is the lever on it. Where a run can still
+fail, `retry_transient` retries a busy or restarting server twice, and a failure
+is reported per batch or per isolate instead of ending the run.
 
 ## Flags
 
@@ -490,11 +489,7 @@ document or per lookup instead of ending the run.
 | --- | --- |
 | `input` (optional) | Directory or file to screen; defaults to `./papers`, else `../papers` |
 | `--search QUERY` | Retrieval request; typically names a seed paper by URL/DOI. Output: `tb_papers.json` |
-| `--eval-retrieval SEED` | Recall of SEED's held-out reference list. Output: `eval_retrieval.json` |
 | `-n`, `--top` | `[--search]` Upper bound on papers returned, most relevant first (default 10) |
-| `--sources` | `[--search]`, `[--eval-retrieval]` Literature sources to query and merge, comma-separated, from `europepmc`, `semanticscholar`, `crossref` (default all three) |
-| `--rounds` | `[--search]` Discovery rounds (default 2) |
-| `--budget` | `[--search]` Papers the LLM assesses per round (default 20) |
 | `--gold JSON` | `[screening]` Hand labels `{filename: true/false}`; prints accuracy |
 | `--cohort` | Join the resistance table to the listed VCFs; per-drug dataset sizes. Output: `tb_cohort.json` |
 | `--predict DRUG` | Predict resistance to DRUG from each isolate's VCF, with a checked trace. Output: `tb_resistance_<drug>.json` |
@@ -507,16 +502,15 @@ document or per lookup instead of ending the run.
 | `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
 | `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-8B`) |
-| `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). Applies to every mode, `--agent` included |
+| `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). A1 does its tool calling against it too |
 | `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (default: `$LLM_REASONING_EFFORT`, else the server's own default) |
-| `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`) |
-| `--agent` | Use the full A1 agent tool loop, for screening or `--search` |
-| `--batch-size` | `[--agent]` Documents per agent call (default 2) |
+| `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`). Both drive A1; only `Custom` hands back separated traces |
+| `--batch-size` | `[screening]` Documents per agent run (default 2) |
 | `--max-chars` | Excerpt length per document (default 3000) |
-| `--tools` | `[--agent]` Let the agent retrieve a relevant tool subset |
-| `--data-lake` | `[--agent]` Let biomni pull its full data lake (tens of GB) |
+| `--tools` | Let A1 retrieve a relevant tool subset instead of carrying them all |
+| `--data-lake` | Let biomni pull its full data lake (tens of GB) |
 | `--temperature` | Sampling temperature (default 0.2) |
-| `--verbose` | `[--search --agent]` Also print biomni's full step-by-step agent output |
+| `--verbose` | `[--search]` Also print biomni's full step-by-step agent output |
 
 ## Layout
 
@@ -529,13 +523,10 @@ tb_search/
   config.py        Settings loaded from .env / environment: which local backend, which model
   reasoning.py     reasoning effort, and pulling a reply's thinking out of it
   documents.py     collect files, extract text and section-aware excerpts
-  prompts.py       the assessment, query-writing and agent prompts
-  verdicts.py      salvage JSON out of whatever the model returned
-  sources.py       Europe PMC, Semantic Scholar, Crossref: seed lookup, references, citations, search
-  discovery.py     the discovery loop: expand, assess, repeat
-  assess.py        structured assessment of a paper or local document
-  evaluate.py      retrieval recall, screening accuracy, resistance scoring
-  screening.py     LLM/agent construction and agent-mode screening
+  prompts.py       the task prompts handed to A1: screening, retrieval, resistance
+  verdicts.py      salvage JSON out of whatever the model returned; check a quote against its text
+  evaluate.py      screening accuracy, resistance scoring, trace grading
+  screening.py     A1 construction, one-run-per-prompt, and agent screening
   retrieval.py     one A1 agent run: query (+ seed paper URL) -> paper rows
   report.py        summary line + JSON output (verdicts, searches, predictions)
   genome.py        H37Rv position -> gene, codon, promoter offset, protein change
@@ -548,5 +539,5 @@ data/
   h37rv.fna.gz           the H37Rv reference sequence, for protein consequences
   cleaned_vcf_paths/     the resistance table and the BIG-TB VCF path list
 eval/              hand labels for screening
-tests/             offline tests for the VCF pipeline
+tests/             offline tests for the VCF pipeline and the model layer
 ```

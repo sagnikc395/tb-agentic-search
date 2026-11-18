@@ -59,32 +59,26 @@ def as_bool(value) -> bool | None:
     return None
 
 
+def _squash(text: str) -> str:
+    """Lowercased alphanumerics only, so a quote survives re-spacing and re-punctuation.
+
+    A PDF excerpt and a model's copy of a sentence from it rarely agree on
+    hyphens, quote marks or line breaks, so comparing the raw strings would
+    reject quotes that are genuinely there.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def quote_in_text(quote: str, text: str) -> bool:
+    """Whether the model's evidence quote really appears in the text it was shown."""
+    squashed = _squash(quote or "")
+    return bool(squashed) and squashed in _squash(text or "")
+
+
 def as_confidence(value) -> str | None:
     if isinstance(value, str) and value.strip().lower() in ("high", "medium", "low"):
         return value.strip().lower()
     return None
-
-
-def parse_assessment(answer: str) -> dict | None:
-    """Pull a single {"relevance": ...} assessment out of the reply, prose and all."""
-    for data in _load_json(answer or ""):
-        for item in _as_list(data) or [data]:
-            if isinstance(item, dict) and ("relevance" in item or "abstain" in item):
-                return item
-    return None
-
-
-def parse_string_list(answer: str) -> list[str]:
-    """Pull a JSON list of strings (search queries) out of the reply; [] when none."""
-    for data in _load_json(answer or ""):
-        found = [
-            item.strip()
-            for item in _as_list(data) or []
-            if isinstance(item, str) and item.strip()
-        ]
-        if found:
-            return found
-    return []
 
 
 def _paper_row(obj: dict) -> dict | None:

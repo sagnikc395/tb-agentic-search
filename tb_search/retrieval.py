@@ -5,13 +5,8 @@ import re
 from contextlib import redirect_stdout
 
 from tb_search.prompts import RETRIEVAL_PROMPT
-from tb_search.screening import is_transient_error, retry_transient
+from tb_search.screening import CONTEXT_HINT, is_context_error, retry_transient
 from tb_search.verdicts import parse_paper_list
-
-CONTEXT_HINT = (
-    "    hint: A1's system prompt is ~35k tokens; serve the model with a larger "
-    "--max-model-len"
-)
 
 # A1 calls its retrieval tools as python inside <execute> blocks, so the
 # searches have to be read back out of the code it wrote; there is no tool
@@ -81,7 +76,7 @@ def retrieve_papers(
         answer = retry_transient(_run_streamed, agent, prompt, verbose)
     except Exception as e:  # noqa: BLE001 - a dead agent run must not stop the CLI
         print(f"  ! agent run failed: {e}", flush=True)
-        if not is_transient_error(e):
+        if is_context_error(e):
             print(CONTEXT_HINT, flush=True)
         answer = ""
 

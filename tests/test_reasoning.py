@@ -14,8 +14,10 @@ from tb_search.reasoning import (
 from tb_search.resistance import check_trace, normalize_prediction, predict
 from tb_search.screening import (
     apply_reasoning_effort,
+    is_context_error,
     is_transient_error,
     reasoning_chat_model,
+    run_agent,
 )
 
 PROVIDER_ENV = (
@@ -45,16 +47,25 @@ def FakeReply(content, additional_kwargs=None):
     return AIMessage(content=content, additional_kwargs=additional_kwargs or {})
 
 
-class FakeLLM:
-    """One canned reply per invoke, and a record of the prompts it was given."""
+class FakeAgent:
+    """An A1 stand-in: one canned (answer, thinking) per run.
 
-    def __init__(self, *replies):
-        self.replies = list(replies)
+    It mimics the shape run_agent depends on — `go` returning (log, content)
+    and the `reasoning_traces` list build_agent attaches, which is where the
+    real agent's thinking has to be collected because A1 drops it.
+    """
+
+    def __init__(self, *runs):
+        self.runs = list(runs)
         self.prompts = []
+        self.reasoning_traces: list[str] = []
 
-    def invoke(self, prompt):
+    def go(self, prompt):
         self.prompts.append(prompt)
-        return self.replies.pop(0)
+        content, thinking = self.runs.pop(0)
+        if thinking:
+            self.reasoning_traces.append(thinking)
+        return ["step"], content
 
 
 # --- settings -----------------------------------------------------------------
@@ -197,6 +208,7 @@ def test_a_busy_server_is_retried_but_a_bad_request_is_not():
     assert is_transient_error(ConnectionError("connection refused"))
     # A prompt longer than the context window will fail again just as fast.
     assert not is_transient_error(ValueError("maximum context length exceeded"))
+    assert is_context_error(ValueError("maximum context length exceeded"))
 
 
 # --- reading a reply ----------------------------------------------------------
@@ -244,14 +256,35 @@ def test_answer_and_trace_prefers_the_servers_own_separation():
 # --- traces beside the predictions --------------------------------------------
 
 
+def test_run_agent_collects_the_thinking_a1_would_have_dropped():
+    """A1 rebuilds each step's message, so the trace only survives in the list."""
+    agent = FakeAgent(("<solution>done</solution>", "step one; step two"))
+    answer, trace = run_agent(agent, "go")
+    assert answer == "<solution>done</solution>"
+    assert trace == "step one; step two"
+
+
+def test_run_agent_falls_back_to_inline_thinking():
+    """Ollama separates nothing and leaves its thinking in <think> tags."""
+    agent = FakeAgent(("<think>weighing it up</think>the answer", ""))
+    assert run_agent(agent, "go") == ("the answer", "weighing it up")
+
+
+def test_each_run_starts_from_a_clean_trace():
+    """One isolate's thinking must not be filed under the next one."""
+    agent = FakeAgent(("a", "first"), ("b", "second"))
+    assert run_agent(agent, "one")[1] == "first"
+    assert run_agent(agent, "two")[1] == "second"
+
+
 def test_predict_keeps_the_trace_next_to_the_call(tmp_path):
     from tb_search.catalogue import panel_for
     from tb_search.cohort import Sample
 
-    llm = FakeLLM(
-        FakeReply(
-            '{"call": "resistant", "variants_cited": [], "genes_cited": ["rpoB"]}',
-            {"reasoning": "S450L sits in the rifampicin resistance hotspot"},
+    agent = FakeAgent(
+        (
+            '<solution>{"call": "resistant", "genes_cited": ["rpoB"]}</solution>',
+            "S450L sits in the rifampicin resistance hotspot",
         )
     )
     sample = Sample(
@@ -260,11 +293,11 @@ def test_predict_keeps_the_trace_next_to_the_call(tmp_path):
         phenotype="R",
         vcf_path=str(tmp_path / "SRR1.vcf"),
     )
-    prediction = predict(llm, sample, [], panel_for("rifampicin"))
+    prediction = predict(agent, sample, [], panel_for("rifampicin"))
 
     assert prediction["call"] == "resistant"
     assert prediction["reasoning_trace"].startswith("S450L sits in")
-    assert RESISTANCE_PROMPT.split("\n")[0] in llm.prompts[0]
+    assert RESISTANCE_PROMPT.split("\n")[0] in agent.prompts[0]
 
 
 def test_a_captured_trace_is_measured_in_the_check():

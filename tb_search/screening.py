@@ -1,16 +1,19 @@
-"""Build the biomni-backed LLM or agent, and run agent-mode screening.
+"""Build the Biomni A1 agent, run it, and screen documents with it.
 
-Everything talks to a model we serve ourselves. On Unity that is vLLM, started
-in its own job with a reasoning parser, so this process — biomni included —
-knows the inference engine only by URL:
+Every mode in this pipeline is one A1 run. The agent talks to a model we serve
+ourselves: on Unity that is vLLM, started in its own job with a reasoning parser
+and tool calling, so this process — biomni included — knows the inference engine
+only by URL:
 
     vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
         --enable-auto-tool-choice --tool-call-parser hermes --port 8000
 
-biomni calls that the "Custom" source, and both the plain per-call screener and
-the full A1 tool loop take it, which is what lets the agent do its tool calling
-against our own engine. Ollama is biomni's other local backend and works the
-same way, minus the separated reasoning traces.
+biomni calls that the "Custom" source, and it is what lets A1 do its tool
+calling against our own engine. Ollama is biomni's other local backend and
+drives the agent the same way, minus the separated reasoning traces.
+
+A1's system prompt is ~35k tokens and rides on every step of every run, so the
+server has to be started with a context window well past that.
 """
 
 import os
@@ -18,13 +21,15 @@ import time
 from pathlib import Path
 
 from tb_search.config import ConfigError, Settings
-from tb_search.documents import extract_text
+from tb_search.documents import read_text, section_excerpt
 from tb_search.prompts import BATCH_SCREEN_PROMPT
+from tb_search.reasoning import REASONING_KEYS, split_thinking
 from tb_search.report import verdict_line
 from tb_search.verdicts import (
     as_bool,
     as_confidence,
     parse_verdict_list,
+    quote_in_text,
 )
 
 # A self-served model has no rate limit, but the server it runs on can still be
@@ -32,6 +37,11 @@ from tb_search.verdicts import (
 RETRY_WAIT_SECONDS = (5, 20)
 # Ollama's own default port, where its model list lives.
 OLLAMA_HOST = "http://localhost:11434"
+# What a run that ran out of context should be told to do about it.
+CONTEXT_HINT = (
+    "    hint: A1's system prompt is ~35k tokens; serve the model with a larger "
+    "--max-model-len, or cut --batch-size / --max-chars"
+)
 
 
 def _check_custom(settings: Settings) -> None:
@@ -124,14 +134,20 @@ def apply_reasoning_effort(llm, effort: str | None):
     return llm
 
 
-def reasoning_chat_model(settings: Settings):
+def reasoning_chat_model(settings: Settings, traces: list[str] | None = None):
     """A ChatOpenAI that keeps the reasoning field the base class throws away.
 
     langchain's ChatOpenAI tracks the official OpenAI schema and drops anything
     else a provider adds, vLLM's separated `reasoning` (older servers:
     `reasoning_content`) among it — so the traces would never reach us. This
     subclass copies it back onto the message's additional_kwargs, where
-    tb_search.reasoning looks for it.
+    tb_search.reasoning looks for it, and appends it to `traces` when one is
+    given.
+
+    That second copy is what makes an agent run traceable at all: A1 rebuilds
+    every step's reply as a fresh AIMessage, so additional_kwargs is gone by the
+    time the step reaches the graph state. The list is the only place the
+    thinking survives.
 
     It stays a ChatOpenAI subclass on purpose: biomni's A1 calls
     `with_structured_output` on whatever model it is given.
@@ -143,10 +159,14 @@ def reasoning_chat_model(settings: Settings):
             result = super()._create_chat_result(response, generation_info)
             for generation, choice in zip(result.generations, _choices(response)):
                 message = (choice or {}).get("message") or {}
-                for key in ("reasoning", "reasoning_content"):
+                found = ""
+                for key in REASONING_KEYS:
                     text = message.get(key)
                     if isinstance(text, str) and text.strip():
                         generation.message.additional_kwargs[key] = text
+                        found = found or text.strip()
+                if found and traces is not None:
+                    traces.append(found)
             return result
 
     return ChatOpenAIKeepingReasoning(
@@ -182,44 +202,12 @@ def _prime_environment(settings: Settings) -> None:
         os.environ.setdefault("OPENAI_API_KEY", settings.api_key)
 
 
-def build_screener(settings: Settings):
-    """A plain chat model — no A1 prompt around it.
-
-    The cheap path: ~1k tokens per call instead of the A1 agent's ~35k-token
-    system prompt, so a run over thousands of isolates is one short request
-    each, and a smaller served model can still handle it.
-    """
-    from biomni.config import default_config
-
-    default_config.temperature = settings.temperature
-    _prime_environment(settings)
-    return apply_reasoning_effort(_chat_model(settings), settings.reasoning_effort)
-
-
-def _chat_model(settings: Settings):
-    """The chat model for this backend: ours when it can carry reasoning.
-
-    A server reached over the OpenAI-compatible API is the case the
-    reasoning-keeping subclass covers. Ollama goes through biomni, which builds
-    a ChatOllama for it; its thinking arrives inside the answer instead, where
-    tb_search.reasoning picks it out of the <think> tags.
-    """
-    if settings.is_custom:
-        return reasoning_chat_model(settings)
-
-    from biomni.llm import get_llm
-
-    return get_llm(
-        model=settings.model,
-        source=settings.source,
-        temperature=settings.temperature,
-        base_url=settings.base_url,
-        api_key=settings.api_key if settings.is_custom else None,
-    )
-
-
 def build_agent(settings: Settings):
     """Construct a Biomni A1 agent wired to our own model server.
+
+    This is the pipeline's one model object: screening, retrieval and resistance
+    prediction are all A1 runs, so every prompt goes through the same agent and
+    the same tool loop.
 
     The source matters: biomni's auto-detection sees the slash in a HuggingFace
     model id like "Qwen/Qwen3-8B" and would route it to Ollama on its own.
@@ -248,13 +236,35 @@ def build_agent(settings: Settings):
         # An empty list (not None) is biomni's signal to skip its download.
         expected_data_lake_files=None if settings.load_data_lake else [],
     )
+    # Where run_agent reads each run's thinking back out. A plain attribute,
+    # because A1 is an ordinary class and this is the one piece of per-run state
+    # the agent does not already keep for us.
+    agent.reasoning_traces = []
     # A1 built its own plain ChatOpenAI, which drops the reasoning field; swap
     # in the one that keeps it, so agent runs are traceable too. The agent uses
     # self.llm for every step, so replacing it after init is enough.
     if settings.is_custom:
-        agent.llm = _chat_model(settings)
+        agent.llm = reasoning_chat_model(settings, agent.reasoning_traces)
     apply_reasoning_effort(getattr(agent, "llm", None), settings.reasoning_effort)
     return agent
+
+
+def run_agent(agent, prompt: str) -> tuple[str, str]:
+    """One A1 run: (its final answer, the thinking behind it).
+
+    The trace is the whole run's thinking, step by step, rather than the last
+    step's alone — with a tool loop in the middle, that is what the answer was
+    actually reasoned from. It comes from the list `build_agent` handed the chat
+    model, because A1 drops the server's `reasoning` field on the way into the
+    graph state. Ollama separates nothing and leaves its thinking inline in
+    <think> tags, which is the fallback.
+    """
+    traces = getattr(agent, "reasoning_traces", None)
+    if traces is not None:
+        del traces[:]
+    _log, content = retry_transient(agent.go, prompt)
+    answer, inline = split_thinking(content or "")
+    return answer, "\n\n".join(traces or []) or inline
 
 
 def is_transient_error(exc: Exception) -> bool:
@@ -282,6 +292,12 @@ def is_transient_error(exc: Exception) -> bool:
     )
 
 
+def is_context_error(exc: Exception) -> bool:
+    """Whether the run died of a prompt longer than the served context window."""
+    text = str(exc).lower()
+    return "context" in text or "length" in text
+
+
 def retry_transient(action, *args):
     """Run `action`, waiting out a busy or restarting server up to twice."""
     for attempt, wait in enumerate((*RETRY_WAIT_SECONDS, None)):
@@ -298,13 +314,21 @@ def retry_transient(action, *args):
             time.sleep(wait)
 
 
-def _row(path: Path, verdict: dict, fallback_reason: str) -> dict:
-    """The one result-row shape written to JSON and the summary line."""
+def _row(path: Path, verdict: dict, text: str, fallback_reason: str) -> dict:
+    """The one result-row shape written to JSON and the summary line.
+
+    `evidence_verified` is the check that separates a screened document from an
+    invented one: a quote the excerpt does not contain is the model talking, not
+    the paper.
+    """
+    evidence = str(verdict.get("evidence", "")).strip()
     return {
         "file": path.name,
         "path": str(path),
         "tb_related": as_bool(verdict.get("tb_related")),
         "confidence": as_confidence(verdict.get("confidence")),
+        "evidence": evidence,
+        "evidence_verified": quote_in_text(evidence, text) if evidence else None,
         "reason": str(verdict.get("reason", "")).strip() or fallback_reason,
     }
 
@@ -312,47 +336,48 @@ def _row(path: Path, verdict: dict, fallback_reason: str) -> dict:
 def classify_documents_agent(
     agent, docs: list[Path], batch_size: int, max_chars: int
 ) -> list[dict]:
-    """Ask the full A1 agent to judge the docs in batches; one row per doc."""
+    """Ask the A1 agent to judge the docs in batches; one row per doc.
+
+    One failed batch is marked unknown rather than taking the run down: a
+    screening pass over a whole directory should survive a single agent run that
+    ran out of context or came back unparseable.
+    """
     rows: list[dict] = []
     batches = [docs[i : i + batch_size] for i in range(0, len(docs), batch_size)]
 
     for batch_number, batch in enumerate(batches, start=1):
+        # The opening plus the starts of the methods and closing sections: the
+        # opening alone cannot tell a TB methods paper from one that names TB in
+        # passing, and it is also what the evidence quote is checked against.
+        texts = [section_excerpt(read_text(path), max_chars) for path in batch]
         listing = "\n\n".join(
-            f"Doc {index} — {path.name}\n{extract_text(path, max_chars)}"
-            for index, path in enumerate(batch)
+            f"Doc {index} — {path.name}\n{text}"
+            for index, (path, text) in enumerate(zip(batch, texts))
         )
         prompt = BATCH_SCREEN_PROMPT.replace("{DOCS}", listing)
+        label = f"{batch_number}/{len(batches)}"
 
-        try:
-            _log, answer = agent.go(prompt)
-        except Exception as e:  # noqa: BLE001 - a failed batch must not stop the run
-            print(
-                f"  ! agent call {batch_number}/{len(batches)} failed, marking batch unknown: {e}"
-            )
-            if "context" in str(e).lower() or "length" in str(e).lower():
-                print(
-                    "    hint: A1's system prompt is ~35k tokens; serve the model "
-                    "with a larger --max-model-len, try --batch-size 1, or drop --agent"
-                )
-            answer = ""
-
-        verdicts = parse_verdict_list(answer or "", len(batch))
-        if len(verdicts) < len(batch):  # one retry, with a sterner reminder
+        verdicts: dict[int, dict] = {}
+        for strict in (False, True):  # second pass only asks for stricter JSON
+            if strict:
+                prompt += "\n\nREMINDER: reply with ONLY the JSON list, no other text."
             try:
-                _log, answer = agent.go(
-                    prompt
-                    + "\n\nREMINDER: reply with ONLY the JSON list, no other text."
-                )
-                verdicts = parse_verdict_list(answer or "", len(batch))
-            except Exception as e:  # noqa: BLE001 - leave unparsed docs as unknown
-                print(f"  ! retry failed, leaving unparsed docs as unknown: {e}")
+                answer, _trace = run_agent(agent, prompt)
+            except Exception as e:  # noqa: BLE001 - a failed batch must not stop the run
+                print(f"  ! agent call {label} failed, marking batch unknown: {e}")
+                if is_context_error(e):
+                    print(CONTEXT_HINT)
+                break
+            verdicts = parse_verdict_list(answer, len(batch))
+            if len(verdicts) == len(batch):
+                break
 
-        print(f"Batch {batch_number}/{len(batches)}:")
-        for index, path in enumerate(batch):
-            verdict = verdicts.get(index, {})
+        print(f"Batch {label}:")
+        for index, (path, text) in enumerate(zip(batch, texts)):
             row = _row(
                 path,
-                verdict,
+                verdicts.get(index, {}),
+                text,
                 "agent verdict could not be parsed" if not verdicts else "",
             )
             rows.append(row)

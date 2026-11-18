@@ -1,36 +1,35 @@
-"""Screen research documents and predict TB drug resistance with an LLM-backed agent.
+"""Screen research documents and predict TB drug resistance with the Biomni A1 agent.
 
-Every mode runs against a model you serve yourself: a vLLM job holding it, with
-this process (and biomni inside it) talking to that engine over HTTP. Start the
+Every LLM mode is one A1 run. The agent runs in this process and talks to a
+model you serve yourself: a vLLM job holding it, reached over HTTP. Start the
 server with a reasoning parser and --reasoning-effort is honoured and the
-model's thinking is recorded next to each prediction:
+model's thinking is recorded next to each prediction. Tool calling has to be on,
+because A1 calls its tools as code, and the context window has to clear A1's
+~35k-token system prompt:
 
     vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
-        --enable-auto-tool-choice --tool-call-parser hermes --port 8000
+        --enable-auto-tool-choice --tool-call-parser hermes \
+        --max-model-len 65536 --port 8000
     tb-search --predict rifampicin --base-url http://$NODE:8000/v1 \
         --model Qwen/Qwen3-8B --reasoning-effort high
 
-Two screening modes: light (default) makes one small LLM call per document;
---agent runs the full Biomni A1 agent tool loop, whose ~35k-token system prompt
-needs the server started with a context window to match.
-
-Separately, --search runs the discovery loop on a retrieval request — often one
-naming a seed paper by URL or DOI — and saves the related papers it finds;
---eval-retrieval scores that loop against the seed's held-out reference list.
+The default mode screens a directory of documents, handing the agent
+--batch-size of them per run. --search runs a retrieval request instead — often
+one naming a seed paper by URL or DOI — and saves the related papers the agent
+found through its own search tools.
 
 The VCF side is its own pair of modes. --cohort joins the BIG-TB resistance
-table to the listed VCFs and reports the labelled dataset size per drug;
---predict DRUG reads each isolate's VCF, asks the model for a resistant /
-not resistant / unknown call with a reasoning trace, and scores both the calls
-against the DST phenotype and the traces against the variants actually present.
+table to the listed VCFs and reports the labelled dataset size per drug, with no
+model involved; --predict DRUG reads each isolate's VCF, asks the agent for a
+resistant / not resistant / unknown call with a reasoning trace, and scores both
+the calls against the DST phenotype and the traces against the variants actually
+present.
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from tb_search.assess import assess_documents
 from tb_search.catalogue import drug_key, known_drugs, panel_for
 from tb_search.cohort import DATA_DIR, CohortError, load_cohort
 from tb_search.config import (
@@ -41,16 +40,10 @@ from tb_search.config import (
     ConfigError,
     load_settings,
 )
-from tb_search.discovery import DiscoveryConfig, discover
 from tb_search.documents import EXCERPT_CHARS, collect_docs, resolve_input
-from tb_search.evaluate import (
-    evaluate_resistance,
-    evaluate_retrieval,
-    evaluate_screening,
-)
+from tb_search.evaluate import evaluate_resistance, evaluate_screening
 from tb_search.reasoning import EFFORTS
 from tb_search.report import (
-    discovered_rows,
     write_cohort,
     write_papers,
     write_predictions,
@@ -60,11 +53,9 @@ from tb_search.resistance import predict_samples
 from tb_search.retrieval import retrieve_papers
 from tb_search.screening import (
     build_agent,
-    build_screener,
     check_connection,
     classify_documents_agent,
 )
-from tb_search.sources import SOURCE_NAMES, build_source
 
 
 def provider_options(args) -> dict:
@@ -75,6 +66,8 @@ def provider_options(args) -> dict:
         "base_url": args.base_url,
         "reasoning_effort": args.reasoning_effort,
         "source": args.source,
+        "use_tool_retriever": args.tools or None,
+        "load_data_lake": args.data_lake or None,
     }
 
 
@@ -84,11 +77,22 @@ def fail(message: str) -> int:
     return 1
 
 
+def connected_agent(args):
+    """Settings checked, server pinged, agent built — the one model path.
+
+    Raises ConfigError, so a server that is down or serving a different model
+    fails here rather than part-way through a sweep.
+    """
+    settings = load_settings(**provider_options(args))
+    check_connection(settings)
+    return settings, build_agent(settings)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tb-search",
         description="Screen TB literature and predict drug resistance from VCFs "
-        "with a biomni-powered LLM, served locally with vLLM or Ollama.",
+        "with the Biomni A1 agent, on a model served locally with vLLM or Ollama.",
     )
     parser.add_argument(
         "input",
@@ -100,27 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--search",
         metavar="QUERY",
         help="Retrieval request — typically a sentence naming a seed paper by URL "
-        "or DOI, e.g. 'find me relevant papers like this paper <url>'. Runs the "
-        "discovery loop, or the A1 agent with --agent. Output defaults to "
-        "tb_papers.json.",
-    )
-    parser.add_argument(
-        "--eval-retrieval",
-        metavar="SEED",
-        help="Score the discovery loop: hide SEED's reference list, search, and "
-        "report how much of it is recovered. Output defaults to eval_retrieval.json.",
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=2,
-        help="[--search] Discovery rounds (default: 2).",
-    )
-    parser.add_argument(
-        "--budget",
-        type=int,
-        default=20,
-        help="[--search] Papers the LLM assesses per round (default: 20).",
+        "or DOI, e.g. 'find me relevant papers like this paper <url>'. The agent "
+        "searches with its own tools. Output defaults to tb_papers.json.",
     )
     parser.add_argument(
         "--gold",
@@ -142,13 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="[--search] Upper bound on papers returned, most relevant first "
-        "(default: 10). Fewer come back when fewer are judged relevant.",
-    )
-    parser.add_argument(
-        "--sources",
-        default=",".join(SOURCE_NAMES),
-        help="[--search] Comma-separated literature sources to query and merge "
-        f"(default: {','.join(SOURCE_NAMES)}).",
+        "(default: 10). Fewer come back when the agent confirmed fewer.",
     )
     parser.add_argument(
         "--cohort",
@@ -217,8 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="URL",
         help="Where the model is served — the vLLM job's URL, e.g. "
         f"http://gpu042:8000/v1 (default: $VLLM_BASE_URL or {DEFAULT_BASE_URL}). "
-        "This is biomni's Custom source, which the A1 agent takes too, so "
-        "--agent does its tool calling against that same server.",
+        "This is biomni's Custom source, which A1 takes too, so the agent does "
+        "its tool calling against that same server.",
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -234,20 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=LOCAL_SOURCES,
         help="Which biomni backend serves the model: Custom (any "
         "OpenAI-compatible server, i.e. vLLM) or Ollama "
-        f"(default: $LLM_SOURCE or {DEFAULT_SOURCE}). Both drive the A1 agent.",
-    )
-    parser.add_argument(
-        "--agent",
-        action="store_true",
-        help="Use the full biomni A1 agent loop instead of small per-doc LLM calls. "
-        "A1's system prompt is ~35k tokens, so serve the model with a context "
-        "window well past that and with tool calling enabled.",
+        f"(default: $LLM_SOURCE or {DEFAULT_SOURCE}). Both drive A1, but only "
+        "Custom hands back separated reasoning traces.",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=2,
-        help="[--agent] Documents per agent call (default: 2).",
+        help="[screening] Documents per agent run (default: 2).",
     )
     parser.add_argument(
         "--max-chars",
@@ -258,78 +231,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tools",
         action="store_true",
-        help="[--agent] Let the A1 agent retrieve a relevant tool subset.",
+        help="Let A1 retrieve a relevant tool subset instead of carrying them all.",
     )
     parser.add_argument(
         "--data-lake",
         action="store_true",
-        help="[--agent] Let biomni download its full data lake (tens of GB).",
+        help="Let biomni download its full data lake (tens of GB).",
     )
     parser.add_argument("--temperature", type=float, help="Sampling temperature.")
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="[--search --agent] Also print biomni's full step-by-step agent output.",
+        help="[--search] Also print biomni's full step-by-step agent output.",
     )
     return parser
 
 
-def run_discovery(args, output: Path | None) -> int:
-    """--search and --eval-retrieval: the discovery loop."""
-    request = args.search or args.eval_retrieval
-    try:
-        settings = load_settings(**provider_options(args))
-        check_connection(settings)
-    except ConfigError as e:
-        return fail(e)
-    llm, model = build_screener(settings), settings.label
-
-    config = DiscoveryConfig(
-        rounds=max(1, args.rounds),
-        budget=max(1, args.budget),
-        max_papers=max(1, args.max_papers),
-    )
-    try:
-        source = build_source(
-            [name.strip() for name in args.sources.split(",") if name.strip()]
-        )
-    except ValueError as e:
-        return fail(e)
-    print(f"Searching [{config.rounds} round(s), {model}]\n  query: {request}\n")
-    if args.eval_retrieval:
-        report = evaluate_retrieval(source, request, llm, config)
-        if report is None:
-            print(
-                "Seed paper not found, or it has no matched references.",
-                file=sys.stderr,
-            )
-            return 1
-        output = output or Path("eval_retrieval.json")
-        output.write_text(
-            json.dumps({"model": model, **report}, indent=2, ensure_ascii=False)
-        )
-        print(
-            f"\nGold: {report['gold']['all']} references, {report['gold']['tb']} about TB"
-        )
-        for name, scores in report["recall"].items():
-            line = "  ".join(f"{cutoff} {value}" for cutoff, value in scores.items())
-            print(f"  recall ({name}): {line}")
-        print(f"Saved to {output}")
-        return 0
-
-    run = discover(source, request, llm, config)
-    rows = discovered_rows(run.papers(config.max_papers, config.accept))
-    write_papers(rows, model, request, output or Path("tb_papers.json"))
-    return 0
-
-
 def run_cohort(args, output: Path | None) -> int:
-    """--cohort: join the resistance table to the VCF list, no LLM involved."""
+    """--cohort: join the resistance table to the VCF list, no agent involved."""
     try:
         cohort = load_cohort(args.data_dir)
     except CohortError as e:
         return fail(e)
     write_cohort(cohort, output or Path("tb_cohort.json"))
+    return 0
+
+
+def run_search(args, output: Path | None) -> int:
+    """--search: one A1 run on a retrieval request, its paper list saved."""
+    max_papers = max(1, args.max_papers)
+    try:
+        settings, agent = connected_agent(args)
+    except ConfigError as e:
+        return fail(e)
+    print(
+        f"Searching for up to {max_papers} paper(s) "
+        f"[A1 agent, {settings.description}]\n"
+        f"  query: {args.search}\n"
+    )
+    rows = retrieve_papers(agent, args.search, max_papers, args.verbose)
+    write_papers(rows, settings.label, args.search, output or Path("tb_papers.json"))
     return 0
 
 
@@ -358,8 +299,7 @@ def run_predict(args, output: Path | None) -> int:
         return fail(f"No isolate has both a VCF and a {drug} phenotype.")
 
     try:
-        settings = load_settings(**provider_options(args))
-        check_connection(settings)
+        settings, agent = connected_agent(args)
     except ConfigError as e:
         return fail(e)
 
@@ -367,7 +307,7 @@ def run_predict(args, output: Path | None) -> int:
     print(
         f"Predicting {drug} resistance for {len(samples)} isolate(s) "
         f"({counts['R']} R, {counts['S']} S) "
-        f"[{settings.description}]"
+        f"[A1 agent, {settings.description}]"
     )
     print(f"  panel: tier 1 {', '.join(panel.tier1) or 'none'}", end="")
     print(f"; tier 2 {', '.join(panel.tier2) or 'none'}" if panel.tier2 else "")
@@ -382,7 +322,7 @@ def run_predict(args, output: Path | None) -> int:
     print()
 
     rows = predict_samples(
-        build_screener(settings),
+        agent,
         samples,
         drug,
         pass_only=not args.keep_filtered,
@@ -400,84 +340,34 @@ def run_predict(args, output: Path | None) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    output = Path(args.output) if args.output else None
-    if args.cohort:
-        return run_cohort(args, output)
-    if args.predict:
-        return run_predict(args, output)
-    if args.eval_retrieval or (args.search and not args.agent):
-        return run_discovery(args, Path(args.output) if args.output else None)
-
-    mode = "search" if args.search else ("agent" if args.agent else "light")
-    output = Path(
-        args.output or ("tb_papers.json" if mode == "search" else "tb_verdicts.json")
-    )
-
-    try:
-        settings = load_settings(
-            **provider_options(args),
-            use_tool_retriever=args.tools or None,
-            load_data_lake=args.data_lake or None,
-        )
-    except ConfigError as e:
-        return fail(e)
-
-    if mode == "search":
-        max_papers = max(1, args.max_papers)
-        print(
-            f"Searching for up to {max_papers} paper(s) "
-            f"[A1 agent, {settings.description}]\n"
-            f"  query: {args.search}\n"
-        )
-        try:
-            check_connection(settings)
-            rows = retrieve_papers(
-                build_agent(settings), args.search, max_papers, args.verbose
-            )
-        except ConfigError as e:
-            return fail(e)
-        write_papers(rows, settings.label, args.search, output)
-        return 0
-
+def run_screening(args, output: Path | None) -> int:
+    """The default mode: screen a directory of documents in agent batches."""
     input_path = resolve_input(args.input)
     if input_path is None:
-        print(
+        return fail(
             f"Input not found: {args.input!r}"
             if args.input
-            else "No papers directory found; pass one, e.g. `tb-search ../papers`",
-            file=sys.stderr,
+            else "No papers directory found; pass one, e.g. `tb-search ../papers`"
         )
-        return 1
 
     docs = collect_docs(input_path)
     if not docs:
-        print(
-            f"No .pdf/.txt/.md/... documents found under {input_path}", file=sys.stderr
-        )
-        return 1
-
-    print(
-        f"Screening {len(docs)} document(s) under {input_path} "
-        f"[mode: {mode}, {settings.description}]\n"
-    )
+        return fail(f"No .pdf/.txt/.md/... documents found under {input_path}")
 
     try:
-        check_connection(settings)
+        settings, agent = connected_agent(args)
     except ConfigError as e:
         return fail(e)
 
-    if mode == "agent":
-        agent = build_agent(settings)
-        rows = classify_documents_agent(
-            agent, docs, max(1, args.batch_size), max(200, args.max_chars)
-        )
-    else:
-        screener = build_screener(settings)
-        rows = assess_documents(screener, docs, max(200, args.max_chars))
+    print(
+        f"Screening {len(docs)} document(s) under {input_path} "
+        f"[A1 agent, {settings.description}]\n"
+    )
+    rows = classify_documents_agent(
+        agent, docs, max(1, args.batch_size), max(200, args.max_chars)
+    )
+    write_results(rows, settings, input_path, output or Path("tb_verdicts.json"))
 
-    write_results(rows, settings, input_path, output, mode)
     if args.gold:
         scores = evaluate_screening(rows, Path(args.gold))
         print(
@@ -486,6 +376,18 @@ def main(argv: list[str] | None = None) -> int:
             f"abstained: {scores['abstained'] or 'none'}"
         )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    output = Path(args.output) if args.output else None
+    if args.cohort:
+        return run_cohort(args, output)
+    if args.predict:
+        return run_predict(args, output)
+    if args.search:
+        return run_search(args, output)
+    return run_screening(args, output)
 
 
 if __name__ == "__main__":

@@ -18,8 +18,7 @@ from dataclasses import dataclass, field
 from tb_search.catalogue import Panel, panel_for
 from tb_search.cohort import Sample
 from tb_search.prompts import RESISTANCE_PROMPT
-from tb_search.reasoning import answer_and_trace
-from tb_search.screening import retry_transient
+from tb_search.screening import run_agent
 from tb_search.vcf import Variant, VcfError, panel_gene_set, read_vcf
 from tb_search.verdicts import _load_json, as_confidence
 
@@ -183,12 +182,19 @@ def check_trace(prediction: dict, variants: list[Variant], panel: Panel) -> Trac
     return check
 
 
-def predict(llm, sample: Sample, variants: list[Variant], panel: Panel) -> dict | None:
-    """One LLM call for one isolate/drug; None when no reply could be parsed.
+def predict(
+    agent, sample: Sample, variants: list[Variant], panel: Panel
+) -> dict | None:
+    """One A1 run for one isolate/drug; None when no reply could be parsed.
 
     The returned prediction carries `reasoning_trace`: the thinking the server
-    separated from the answer, which is empty when the model was served without
-    a reasoning parser and wrote none.
+    separated from the answer, collected across every step of the run. It is
+    empty when the model was served without a reasoning parser and wrote none.
+
+    The prompt hands the agent the whole variant list and tells it not to go
+    looking, so the expected run is a single <solution> step — but it is still
+    an A1 run, and its tool loop stays available for a variant it wants to read
+    up on.
     """
     prompt = (
         RESISTANCE_PROMPT.replace("{DRUG}", panel.drug)
@@ -208,8 +214,7 @@ def predict(llm, sample: Sample, variants: list[Variant], panel: Panel) -> dict 
     for strict in (False, True):  # second pass only asks for stricter JSON
         if strict:
             prompt += "\n\nREMINDER: reply with ONLY the JSON object, no other text."
-        reply = retry_transient(llm.invoke, prompt)
-        answer, trace = answer_and_trace(reply)
+        answer, trace = run_agent(agent, prompt)
         data = parse_prediction(answer)
         if data:
             return normalize_prediction(data, trace)
@@ -236,7 +241,7 @@ def normalize_prediction(data: dict, reasoning_trace: str = "") -> dict:
 
 
 def predict_sample(
-    llm,
+    agent,
     sample: Sample,
     panel: Panel,
     pass_only: bool = True,
@@ -274,7 +279,7 @@ def predict_sample(
 
     variants = read.by_tier(panel)
     try:
-        prediction = predict(llm, sample, variants, panel)
+        prediction = predict(agent, sample, variants, panel)
     except Exception as e:  # noqa: BLE001 - one failed isolate must not stop the run
         return {
             **row,
@@ -313,19 +318,19 @@ def predict_sample(
 
 
 def predict_samples(
-    llm,
+    agent,
     samples: list[Sample],
     drug: str,
     pass_only: bool = True,
     min_allele_frequency: float = 0.0,
     log=print,
 ) -> list[dict]:
-    """Predict over a per-drug dataset, one LLM call per isolate."""
+    """Predict over a per-drug dataset, one agent run per isolate."""
     panel = panel_for(drug)
     rows: list[dict] = []
     for number, sample in enumerate(samples, start=1):
         log(f"  {number}/{len(samples)} {sample.isolate} ({sample.phenotype})...")
-        row = predict_sample(llm, sample, panel, pass_only, min_allele_frequency)
+        row = predict_sample(agent, sample, panel, pass_only, min_allele_frequency)
         rows.append(row)
         log(f"    {prediction_line(row)}")
     return rows

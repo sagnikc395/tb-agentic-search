@@ -9,6 +9,11 @@ tb_search.screening's ChatOpenAI subclass copies them onto the message's
 parser and leaves the thinking inline in <think> tags, so that case is handled
 too.
 
+A1 then rebuilds each step's reply as a fresh AIMessage, which drops
+`additional_kwargs` again — so an agent run's traces are collected at the model
+instead (`screening.run_agent`), and `split_thinking` here is the Ollama
+fallback.
+
 The traces are the point of the run, not a side effect: a call is only as good
 as the reasoning behind it, so the trace is captured for every prediction and
 stored beside the variants the model was shown.
@@ -68,13 +73,3 @@ def answer_and_trace(reply) -> tuple[str, str]:
     """
     answer, inline = split_thinking(reply.text)
     return answer, reasoning_trace(reply) or inline
-
-
-def answer_text(reply) -> str:
-    """The answer alone: a reasoning model's thinking is dropped, not parsed.
-
-    A model served without a vLLM reasoning parser leaves its thinking inline in
-    <think> tags, and that thinking often rehearses JSON it then discards — so
-    feeding it to the verdict parser reads the draft instead of the answer.
-    """
-    return answer_and_trace(reply)[0]

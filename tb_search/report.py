@@ -21,7 +21,7 @@ def verdict_line(row: dict) -> str:
 
 
 def write_results(
-    rows: list[dict], settings: Settings, input_path: Path, output: Path, mode: str
+    rows: list[dict], settings: Settings, input_path: Path, output: Path
 ) -> None:
     counts = {"related": 0, "not_related": 0, "unknown": 0}
     for row in rows:
@@ -35,7 +35,7 @@ def write_results(
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "model": settings.label,
-        "mode": mode,
+        "mode": "agent",
         "input": str(input_path),
         "summary": counts,
         "results": rows,
@@ -55,26 +55,6 @@ def paper_line(row: dict) -> str:
         f"\n      {row[key]}" for key in ("link", "relevance") if row.get(key)
     )
     return f"{row['title']}{year}{source}{tail}"
-
-
-def discovered_rows(candidates) -> list[dict]:
-    """Discovery candidates as paper rows: the --search shape plus routes and assessment."""
-    rows = []
-    for candidate in candidates:
-        paper, assessment = candidate.paper, candidate.assessment or {}
-        rows.append(
-            {
-                "title": paper.title,
-                "year": paper.year,
-                "link": paper.link,
-                "source": paper.source,
-                "relevance": assessment.get("reason", ""),
-                "relevance_score": candidate.relevance,
-                "routes": candidate.routes,
-                "assessment": assessment or None,
-            }
-        )
-    return rows
 
 
 def write_papers(rows: list[dict], model: str, query: str, output: Path) -> None:
