@@ -194,9 +194,23 @@ checkpoint and picks the `awq_marlin` kernel itself, so there is no
 same job instead; same family, so the parsers are unchanged and only the served
 id passed to the client changes.
 
-The job's defaults — partition, the `a100` constraint, walltime, the venv
-holding vLLM — are set at the top of that file and will want matching to your
-Unity allocation. It runs, in effect:
+The job asks for `--gres=gpu:a100:1` and names no partition, so Unity routes it
+from the resources requested. There is no plain `gpu` partition holding A100s
+there — `sinfo -o '%P %G %f' | grep a100` lists them under `gpu-highvram`,
+`gpu-preempt-highvram`, `superpod-a100`, and the PI partitions (`cbio-gpu`,
+`ece-gpu`, `umd-cscdr-gpu`) — so asking for `--partition=gpu --constraint=a100`
+gets you `sbatch: error: Requested node configuration is not available`. To aim
+the job anyway, pass `SBATCH_ARGS` instead of editing the file; it overrides the
+job's own directives:
+
+```bash
+SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run_experiment.sh
+SBATCH_ARGS="--constraint=a100-80g" ./run_experiment.sh   # 80 GB cards only
+```
+
+A failed submission now prints the GPU nodes the cluster actually offers, which
+is the list to choose from. Walltime and the venv holding vLLM are set at the
+top of the job file. It runs, in effect:
 
 ```bash
 vllm serve Qwen/Qwen3-32B-AWQ --port 8000 \

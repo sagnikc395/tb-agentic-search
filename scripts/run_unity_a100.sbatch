@@ -1,12 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=tb-a100
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --constraint=a100
+#SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/tb-a100-%j.out
+# No --partition on purpose. There is no plain `gpu` partition holding A100s on
+# Unity: `sinfo -o '%P %G %f' | grep a100` puts them in gpu-highvram,
+# gpu-preempt-highvram, superpod-a100 and the PI partitions (cbio-gpu, ece-gpu,
+# umd-cscdr-gpu). Naming a partition that has none is how you get
+#   sbatch: error: Requested node configuration is not available
+# so let Unity route the job from the --gres above instead. To aim it anyway,
+# without editing this file — run_experiment.sh passes SBATCH_ARGS through, and
+# sbatch also honours SBATCH_PARTITION / SBATCH_CONSTRAINT:
+#   SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run_experiment.sh
+#   SBATCH_ARGS="--constraint=a100-80g" ./run_experiment.sh   # 80 GB cards only
 # One Slurm job on a Unity A100: serve a quantized Qwen3 with vLLM, then run
 # the biomni A1 pipeline against it over HTTP. The agent only ever knows the
 # inference engine by URL, so nothing here calls a hosted API.

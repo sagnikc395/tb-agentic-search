@@ -52,7 +52,20 @@ if ! curl -sf --max-time 10 "${BASE_URL}/models" >/dev/null 2>&1; then
     fi
     echo "No server at ${BASE_URL}; submitting the A100 job to run this there."
     mkdir -p logs
-    sbatch "${REPO}/scripts/run_unity_a100.sbatch" experiment
+    # shellcheck disable=SC2086
+    if ! sbatch ${SBATCH_ARGS:-} "${REPO}/scripts/run_unity_a100.sbatch" experiment; then
+        # "Requested node configuration is not available" means nothing on the
+        # cluster matches the resources asked for, so print what does and let
+        # the reader pick. SBATCH_ARGS overrides the job's own directives.
+        echo >&2
+        echo "Submission failed. GPU nodes this cluster actually has:" >&2
+        sinfo -o '%20P %10l %8D %6t %30G %f' 2>/dev/null \
+            | awk 'NR==1 || /gpu:/' >&2 || true
+        echo >&2
+        echo "Re-submit against one of those, e.g.:" >&2
+        echo '  SBATCH_ARGS="--partition=<partition> --gres=gpu:a100:1" ./run_experiment.sh' >&2
+        exit 1
+    fi
     echo "Watch it with:  tail -f logs/tb-a100-<jobid>.out"
     exit 0
 fi
