@@ -86,15 +86,28 @@ if [ -n "${ATTACH_JOB}" ]; then
 else
 
 echo "Submitting ${SCRIPT}..."
+# sbatch writes advisory notes ("INFO: Note that 32 GB per node will...") to
+# stderr, so stderr is kept out of the id and parked in a file for the error
+# path. Folding it in with 2>&1 makes JOB the whole notice plus the number,
+# and every squeue, log path and results glob after this point misses.
+SBATCH_ERR="$(mktemp)"
 # shellcheck disable=SC2086
-JOB="$(sbatch --parsable ${SBATCH_ARGS:-} "${SCRIPT}" 2>&1)" || {
-    echo "Submission failed: ${JOB}" >&2
+JOB="$(sbatch --parsable ${SBATCH_ARGS:-} "${SCRIPT}" 2>"${SBATCH_ERR}")" || {
+    echo "Submission failed: $(cat "${SBATCH_ERR}")" >&2
+    rm -f "${SBATCH_ERR}"
     echo >&2
     echo "If that says the node configuration is not available, nothing on the" >&2
     echo "cluster matches the request. What exists right now:" >&2
     sinfo -h -o '%20P %10l %8D %6t %30G %f' 2>/dev/null | head -20 >&2
     exit 1
 }
+# Show the notes, since they are worth reading, then reduce --parsable's
+# "jobid" or "jobid;cluster" to the bare number the rest of the script uses.
+[ -s "${SBATCH_ERR}" ] && sed 's/^/  /' "${SBATCH_ERR}" >&2
+rm -f "${SBATCH_ERR}"
+JOB="${JOB%%;*}"
+JOB="$(printf '%s' "${JOB}" | tr -cd '0-9')"
+[ -n "${JOB}" ] || { echo "sbatch returned no job id." >&2; exit 1; }
 LOG="logs/${PREFIX}-${JOB}.out"
 echo "Job ${JOB} submitted; its log will be ${LOG}"
 echo
