@@ -21,7 +21,7 @@ from tb_search.reasoning import normalize_effort
 # it at once: vLLM serves it with a `qwen3` reasoning parser and with tool
 # calling, and biomni reaches it as an ordinary OpenAI-compatible model, which
 # is what A1 needs to call its tools.
-DEFAULT_MODEL = "Qwen/Qwen3-8B"
+DEFAULT_MODEL = "Qwen/Qwen3-32B-AWQ"
 # biomni's name for "an OpenAI-compatible endpoint I am handed the URL of",
 # which is what a vLLM server is.
 CUSTOM_SOURCE = "Custom"

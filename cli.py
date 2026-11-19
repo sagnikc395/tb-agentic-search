@@ -7,11 +7,11 @@ model's thinking is recorded next to each prediction. Tool calling has to be on,
 because A1 calls its tools as code, and the context window has to clear A1's
 ~35k-token system prompt:
 
-    vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
+    vllm serve Qwen/Qwen3-32B-AWQ --reasoning-parser qwen3 \
         --enable-auto-tool-choice --tool-call-parser hermes \
         --max-model-len 65536 --port 8000
     tb-search --predict rifampicin --base-url http://$NODE:8000/v1 \
-        --model Qwen/Qwen3-8B --reasoning-effort high
+        --model Qwen/Qwen3-32B-AWQ --reasoning-effort high
 
 The default mode screens a directory of documents, handing the agent
 --batch-size of them per run. --search runs a retrieval request instead — often

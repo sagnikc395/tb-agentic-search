@@ -5,7 +5,7 @@ ourselves: on Unity that is vLLM, started in its own job with a reasoning parser
 and tool calling, so this process — biomni included — knows the inference engine
 only by URL:
 
-    vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3 \
+    vllm serve Qwen/Qwen3-32B-AWQ --reasoning-parser qwen3 \
         --enable-auto-tool-choice --tool-call-parser hermes --port 8000
 
 biomni calls that the "Custom" source, and it is what lets A1 do its tool
@@ -210,7 +210,7 @@ def build_agent(settings: Settings):
     the same tool loop.
 
     The source matters: biomni's auto-detection sees the slash in a HuggingFace
-    model id like "Qwen/Qwen3-8B" and would route it to Ollama on its own.
+    model id like "Qwen/Qwen3-32B-AWQ" and would route it to Ollama on its own.
     "Custom" is the branch that points langchain at base_url, which is how the
     agent's tool calling runs against the inference engine on the cluster.
     """

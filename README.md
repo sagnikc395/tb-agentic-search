@@ -44,7 +44,7 @@ cp .env.example .env   # optional: everything in it has a default
 ```
 
 Every mode but `--cohort` needs a model server to call, and nothing in `.env`
-is required to reach one: the defaults are `Qwen/Qwen3-8B` at
+is required to reach one: the defaults are `Qwen/Qwen3-32B-AWQ` at
 `http://localhost:8000/v1`, so `--base-url` (or `VLLM_BASE_URL`) is all that
 changes when the server lives on a compute node.
 
@@ -126,41 +126,44 @@ agent:
 | `Ollama` | a pulled Ollama model on its own port | only what the model leaves in `<think>` tags |
 
 `Custom` is the one to use on the cluster. The default model is
-`Qwen/Qwen3-8B`: vLLM serves it with a `qwen3` reasoning parser *and* with
+`Qwen/Qwen3-32B-AWQ`: vLLM serves it with a `qwen3` reasoning parser *and* with
 tool calling, and biomni reaches it as an ordinary OpenAI-compatible model,
 which is what A1 needs to call its tools — all three at once, which not every
 model manages.
 
-`scripts/serve_vllm_unity.sbatch` starts the server in its own Slurm job:
+`scripts/run_unity_a100.sbatch` is the whole cluster side: one Slurm job that
+takes an A100, serves the model, waits for it to come up, and then runs the
+pipeline against it. Everything after the script name goes to `cli.py`:
 
 ```bash
-sbatch scripts/serve_vllm_unity.sbatch
-tail -f logs/vllm-<jobid>.out    # prints the exact --base-url to use
+sbatch scripts/run_unity_a100.sbatch --predict rifampicin --limit 40 --balance
+sbatch scripts/run_unity_a100.sbatch --search "fluoroquinolone resistance"
+sbatch scripts/run_unity_a100.sbatch        # no args: serve only, and hold
+tail -f logs/tb-a100-<jobid>.out            # prints the --base-url to use
 ```
 
-(The job's defaults — partition, GPU count, the venv holding vLLM — are set at
-the top of that file and will want matching to your Unity allocation.)
+With no arguments it holds the server for the rest of the walltime, which is
+the mode to use when the client is somewhere else — a tunnel from a laptop, or
+an interactive session. With arguments it kills the server as soon as the run
+finishes, so the card is not held for nothing.
 
-For a single 32 GB card in an interactive session instead of an unattended
-batch job, `scripts/setup_vllm_32g.sh` allocates the session, builds the vLLM
-venv the first time, and serves:
+The model is quantized because of the card. Unity's `a100` nodes are compute
+capability 8.0, which has no native FP8, so 4-bit AWQ is the quantization that
+runs there: `Qwen/Qwen3-32B-AWQ` is ~18 GB of weights, leaving the rest of a
+40 GB card (and most of an 80 GB one) to the KV cache at the 64k context A1
+needs — one GPU is enough for every mode. vLLM reads the AWQ config out of the
+checkpoint and picks the `awq_marlin` kernel itself, so there is no
+`--quantization` flag to pass. `MODEL=Qwen/Qwen3-8B` serves the bf16 8B on the
+same job instead; same family, so the parsers are unchanged and only the served
+id passed to the client changes.
 
-```bash
-scripts/setup_vllm_32g.sh        # from the login node; re-execs into srun --pty
-```
-
-`Qwen/Qwen3-8B` in bf16 is ~16 GB of weights, so a single 32 GB card holds it
-with room left for the KV cache at the 64k context A1 needs — which is
-why it is the default everywhere rather than a fallback, and why one GPU is
-enough for every mode. For a larger model on the same card,
-`MODEL=Qwen/Qwen3-32B-AWQ` is the 4-bit build of the 32B at ~18 GB: the same
-family, so the reasoning and tool-call parsers are unchanged and only the
-served id passed to the client changes (`--model Qwen/Qwen3-32B-AWQ`).
-
-It runs, in effect:
+The job's defaults — partition, the `a100` constraint, walltime, the venv
+holding vLLM — are set at the top of that file and will want matching to your
+Unity allocation. It runs, in effect:
 
 ```bash
-vllm serve Qwen/Qwen3-8B --port 8000 \
+vllm serve Qwen/Qwen3-32B-AWQ --port 8000 \
+    --gpu-memory-utilization 0.90 \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice --tool-call-parser hermes \
     --max-model-len 65536
@@ -179,7 +182,7 @@ inference engine only by URL:
 ```bash
 # resistance prediction, with thinking captured per isolate
 uv run cli.py --predict rifampicin --limit 40 --balance \
-    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-8B \
+    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-32B-AWQ \
     --reasoning-effort high
 
 # from a laptop, through a tunnel: ssh -N -L 8000:gpu042:8000 unity.rc.umass.edu
@@ -255,7 +258,7 @@ A retrieval run echoes the agent's searches as it makes them (the step number in
 brackets), then the papers it settled on:
 
 ```
-Searching for up to 10 paper(s) [A1 agent, Custom Qwen/Qwen3-8B @ http://gpu042:8000/v1]
+Searching for up to 10 paper(s) [A1 agent, Custom Qwen/Qwen3-32B-AWQ @ http://gpu042:8000/v1]
   query: find me relevant papers like this paper https://...
 
   [2] extract_url_content(https://www.biorxiv.org/content/...)
@@ -313,7 +316,7 @@ flowchart TB
     end
 
     subgraph server["inference server — its own Slurm job on a GPU node"]
-        VLLM["vllm serve Qwen/Qwen3-8B<br/>--reasoning-parser qwen3<br/>--enable-auto-tool-choice<br/>--max-model-len 65536"]
+        VLLM["vllm serve Qwen/Qwen3-32B-AWQ<br/>--reasoning-parser qwen3<br/>--enable-auto-tool-choice<br/>--max-model-len 65536"]
     end
 
     CLI --> CFG --> CHK
@@ -458,7 +461,7 @@ The touchpoints are few:
 Six details are easy to get wrong, which is why the code spells them out:
 
 - The source is always passed explicitly. Biomni's auto-detection sees the
-  slash in a HuggingFace id like `Qwen/Qwen3-8B` and would route it to Ollama
+  slash in a HuggingFace id like `Qwen/Qwen3-32B-AWQ` and would route it to Ollama
   on its own. `Custom` is the branch that points langchain at our server; A1
   takes `base_url` too, so the agent's tool calling runs against it.
 - The endpoint is copied into the environment (`BIOMNI_CUSTOM_BASE_URL`,
@@ -501,7 +504,7 @@ is reported per batch or per isolate instead of ending the run.
 | `--min-af` | `[--predict]` Drop variants below this alternate-allele frequency (default 0, keep all) |
 | `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
-| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-8B`) |
+| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-32B-AWQ`) |
 | `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). A1 does its tool calling against it too |
 | `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (default: `$LLM_REASONING_EFFORT`, else the server's own default) |
 | `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`). Both drive A1; only `Custom` hands back separated traces |
@@ -517,8 +520,8 @@ is reported per batch or per isolate instead of ending the run.
 ```
 cli.py             CLI entry point
 scripts/
-  serve_vllm_unity.sbatch   start the vLLM server on Unity, with a reasoning parser
-  setup_vllm_32g.sh         same server in an interactive 32 GB GPU session, venv and all
+  run_unity_a100.sbatch     one Slurm job: serve the quantized model on a Unity
+                            A100, then run the pipeline against it
 tb_search/
   config.py        Settings loaded from .env / environment: which local backend, which model
   reasoning.py     reasoning effort, and pulling a reply's thinking out of it
