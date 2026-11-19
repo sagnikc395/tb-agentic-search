@@ -58,12 +58,12 @@ if ! curl -sf --max-time 10 "${BASE_URL}/models" >/dev/null 2>&1; then
         # cluster matches the resources asked for, so print what does and let
         # the reader pick. SBATCH_ARGS overrides the job's own directives.
         echo >&2
-        echo "Submission failed. GPU nodes this cluster actually has:" >&2
-        sinfo -o '%20P %10l %8D %6t %30G %f' 2>/dev/null \
-            | awk 'NR==1 || /gpu:/' >&2 || true
+        echo "Submission failed. Partitions that hold A100s right now:" >&2
+        sinfo -h -o '%20P %10l %8D %6t %30G' 2>/dev/null \
+            | awk '/gpu:a100/' >&2 || true
         echo >&2
-        echo "Re-submit against one of those, e.g.:" >&2
-        echo '  SBATCH_ARGS="--partition=<partition> --gres=gpu:a100:1" ./run_experiment.sh' >&2
+        echo "Re-submit against one of those:" >&2
+        echo '  SBATCH_ARGS="--partition=<partition>" ./run_experiment.sh' >&2
         exit 1
     fi
     echo "Watch it with:  tail -f logs/tb-a100-<jobid>.out"

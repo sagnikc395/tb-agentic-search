@@ -1,18 +1,23 @@
 #!/bin/bash
 #SBATCH --job-name=tb-a100
+#SBATCH --partition=gpu-highvram
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/tb-a100-%j.out
-# No --partition on purpose. There is no plain `gpu` partition holding A100s on
-# Unity: `sinfo -o '%P %G %f' | grep a100` puts them in gpu-highvram,
-# gpu-preempt-highvram, superpod-a100 and the PI partitions (cbio-gpu, ece-gpu,
-# umd-cscdr-gpu). Naming a partition that has none is how you get
+# The partition has to be named and it has to be one that actually holds A100s.
+# Unity defaults to `cpu`, which rejects any --gres outright, and its plain
+# `gpu` partition carries titan_x/v100/1080_ti/2080_ti/m40/l4/a16 — no A100 —
+# so either of those gives you, respectively,
+#   sbatch: error: Requested GPU in non-GPU partition "cpu"
 #   sbatch: error: Requested node configuration is not available
-# so let Unity route the job from the --gres above instead. To aim it anyway,
-# without editing this file — run_experiment.sh passes SBATCH_ARGS through, and
-# sbatch also honours SBATCH_PARTITION / SBATCH_CONSTRAINT:
+# `sinfo -o '%P %G %f' | grep a100` is the list that settles it: as of writing,
+# gpu-highvram (non-preemptible, used here), gpu-preempt-highvram, superpod-a100
+# and the PI partitions cbio-gpu, ece-gpu, umd-cscdr-gpu.
+#
+# To aim it elsewhere without editing this file — run_experiment.sh passes
+# SBATCH_ARGS through, and those options override the directives above:
 #   SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run_experiment.sh
 #   SBATCH_ARGS="--constraint=a100-80g" ./run_experiment.sh   # 80 GB cards only
 # One Slurm job on a Unity A100: serve a quantized Qwen3 with vLLM, then run

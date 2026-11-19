@@ -194,23 +194,24 @@ checkpoint and picks the `awq_marlin` kernel itself, so there is no
 same job instead; same family, so the parsers are unchanged and only the served
 id passed to the client changes.
 
-The job asks for `--gres=gpu:a100:1` and names no partition, so Unity routes it
-from the resources requested. There is no plain `gpu` partition holding A100s
-there — `sinfo -o '%P %G %f' | grep a100` lists them under `gpu-highvram`,
-`gpu-preempt-highvram`, `superpod-a100`, and the PI partitions (`cbio-gpu`,
-`ece-gpu`, `umd-cscdr-gpu`) — so asking for `--partition=gpu --constraint=a100`
-gets you `sbatch: error: Requested node configuration is not available`. To aim
-the job anyway, pass `SBATCH_ARGS` instead of editing the file; it overrides the
-job's own directives:
+The job asks for `--partition=gpu-highvram --gres=gpu:a100:1`. Both halves
+matter: Unity's default partition is `cpu`, which refuses a `--gres` at all, and
+its plain `gpu` partition holds titan_x/v100/1080_ti/2080_ti/m40/l4/a16 but no
+A100 — so `--partition=gpu --constraint=a100` is unsatisfiable. `sinfo -o '%P %G
+%f' | grep a100` is the list that settles which partitions have them:
+`gpu-highvram` (non-preemptible, the default here), `gpu-preempt-highvram`,
+`superpod-a100`, and the PI partitions `cbio-gpu`, `ece-gpu`, `umd-cscdr-gpu`.
+To aim the job elsewhere, pass `SBATCH_ARGS` instead of editing the file; it
+overrides the job's own directives:
 
 ```bash
 SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run_experiment.sh
 SBATCH_ARGS="--constraint=a100-80g" ./run_experiment.sh   # 80 GB cards only
 ```
 
-A failed submission now prints the GPU nodes the cluster actually offers, which
-is the list to choose from. Walltime and the venv holding vLLM are set at the
-top of the job file. It runs, in effect:
+A failed submission prints the GPU nodes the cluster actually offers, which is
+the list to choose from. Walltime and the venv holding vLLM are set at the top
+of the job file. It runs, in effect:
 
 ```bash
 vllm serve Qwen/Qwen3-32B-AWQ --port 8000 \
