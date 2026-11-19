@@ -48,6 +48,43 @@ is required to reach one: the defaults are `Qwen/Qwen3-32B-AWQ` at
 `http://localhost:8000/v1`, so `--base-url` (or `VLLM_BASE_URL`) is all that
 changes when the server lives on a compute node.
 
+## Running the whole experiment
+
+```bash
+./run_experiment.sh
+```
+
+From a Unity login node that submits `scripts/run_unity_a100.sbatch`, which
+takes an A100, serves the model, and runs this same script against it. With a
+server already up it runs here instead. Three stages: the cohort join (no model
+involved, so it fails fast if the data is unreadable), resistance prediction
+per drug, and literature screening against the hand labels in `eval/`. A stage
+that fails is recorded and the rest still run.
+
+Everything lands in `results/<run-id>/`, which is the folder to hand to someone
+else — raw JSON exactly as the pipeline wrote it, every stage's full log, the
+model and commit and seed the numbers came from, and a `SUMMARY.md` that reads
+first. `scripts/collect_results.sh` is what writes that summary, the
+`metrics.csv` beside it and a `.tar.gz` of the folder; `run_experiment.sh`
+calls it at the end, and you can re-run it on any run folder:
+
+```bash
+scripts/collect_results.sh                    # the newest run
+scripts/collect_results.sh results/<run-id>   # a particular one
+```
+
+The knobs are environment variables, so the defaults stay out of the command:
+
+```bash
+DRUGS="rifampicin isoniazid" LIMIT=40 EFFORT=high ./run_experiment.sh
+VCF_ROOT=/project/.../vcfs ./run_experiment.sh    # VCFs not where the cohort says
+```
+
+`DRUGS` (default: rifampicin, isoniazid, ethambutol, pyrazinamide), `LIMIT`
+isolates per drug, `BALANCE=1` for equal R and S, `SEED` so a run repeats,
+`EFFORT`, `RUN_ID` to name the folder, and `BASE_URL`/`MODEL` to point at a
+server yourself.
+
 ## Resistance prediction from VCFs
 
 The dataset comes from two files in `data/cleaned_vcf_paths/`:
@@ -518,10 +555,12 @@ is reported per batch or per isolate instead of ending the run.
 ## Layout
 
 ```
+run_experiment.sh  the whole experiment, one command; writes results/<run-id>/
 cli.py             CLI entry point
 scripts/
   run_unity_a100.sbatch     one Slurm job: serve the quantized model on a Unity
                             A100, then run the pipeline against it
+  collect_results.sh        SUMMARY.md, metrics.csv and a tarball for a run folder
 tb_search/
   config.py        Settings loaded from .env / environment: which local backend, which model
   reasoning.py     reasoning effort, and pulling a reply's thinking out of it

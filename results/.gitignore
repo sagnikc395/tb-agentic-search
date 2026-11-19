@@ -1,0 +1,3 @@
+# Run folders are the deliverable, not source: keep the directory, not the runs.
+*
+!.gitignore

@@ -11,11 +11,13 @@
 # the biomni A1 pipeline against it over HTTP. The agent only ever knows the
 # inference engine by URL, so nothing here calls a hosted API.
 #
+#   sbatch scripts/run_unity_a100.sbatch experiment  # the whole experiment
 #   sbatch scripts/run_unity_a100.sbatch --search "fluoroquinolone resistance"
-#   sbatch scripts/run_unity_a100.sbatch --predict rifampicin --vcf data/isolates
+#   sbatch scripts/run_unity_a100.sbatch --predict rifampicin --limit 40
 #   sbatch scripts/run_unity_a100.sbatch            # no args: just serve, and hold
 #
-# Everything after the script name is passed straight to cli.py. Watch it with
+# The word `experiment` runs run_experiment.sh, which is the usual way in;
+# anything else is passed straight to cli.py. Watch it with
 #   tail -f logs/tb-a100-<jobid>.out
 #
 # Why this model on this card. Unity's a100 nodes are compute capability 8.0,
@@ -118,8 +120,14 @@ fi
 # Not exec: the trap above has to run afterwards, or the server keeps the card
 # until the walltime expires.
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
-uv run cli.py \
-    --base-url "${BASE_URL}" \
-    --model "${MODEL}" \
-    --source Custom \
-    "$@"
+
+if [ "$1" = "experiment" ]; then
+    shift
+    BASE_URL="${BASE_URL}" MODEL="${MODEL}" ./run_experiment.sh "$@"
+else
+    uv run cli.py \
+        --base-url "${BASE_URL}" \
+        --model "${MODEL}" \
+        --source Custom \
+        "$@"
+fi
