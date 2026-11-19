@@ -80,6 +80,97 @@ if stages.exists():
     if failed:
         lines += [f"**Stages that failed: {', '.join(failed)}** (see `logs/`).", ""]
 
+
+def read_csv(path):
+    """The monitor's timelines. A row mid-write is dropped rather than raising:
+    this runs while a preempted run's last sample may be half-flushed."""
+    if not path.exists():
+        return []
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle, skipinitialspace=True)
+        return [row for row in reader if row.get("timestamp")]
+
+
+def numbers(rows, key):
+    out = []
+    for row in rows:
+        try:
+            out.append(float(row[key]))
+        except (TypeError, ValueError, KeyError):
+            pass
+    return out
+
+
+# What the run did while it ran, as opposed to what it produced. A stage table
+# with durations is the first thing to look at when a run finished but took the
+# whole walltime, and the GPU/throughput lines say whether the time went into
+# the model or into waiting on it.
+stage_records = []
+jsonl = run / "logs" / "stages.jsonl"
+if jsonl.exists():
+    for line in jsonl.read_text().splitlines():
+        try:
+            stage_records.append(json.loads(line))
+        except ValueError:
+            pass
+
+gpu_rows = read_csv(run / "logs" / "gpu_timeline.csv")
+srv_rows = read_csv(run / "logs" / "server_timeline.csv")
+
+if stage_records or gpu_rows or srv_rows:
+    lines += ["## Run monitoring", ""]
+
+if stage_records:
+    total = sum(r.get("seconds") or 0 for r in stage_records)
+    lines += [
+        "| stage | status | exit | started | duration |",
+        "| --- | --- | ---: | --- | ---: |",
+    ]
+    for record in stage_records:
+        seconds = record.get("seconds") or 0
+        lines.append(
+            f"| {record.get('stage', '?')} | {record.get('status', '?')} | "
+            f"{record.get('exit_code', '—')} | {record.get('started_at', '—')} | "
+            f"{seconds // 60:.0f}m{seconds % 60:02.0f}s |"
+        )
+    lines += ["", f"Total stage time: {total // 60:.0f}m{total % 60:02.0f}s.", ""]
+
+if gpu_rows:
+    util = numbers(gpu_rows, "util_gpu_pct")
+    used = numbers(gpu_rows, "mem_used_mib")
+    total_mib = numbers(gpu_rows, "mem_total_mib")
+    parts = [f"{len(gpu_rows)} GPU sample(s)"]
+    if util:
+        idle = sum(1 for value in util if value < 5) / len(util)
+        parts.append(
+            f"utilisation mean {sum(util) / len(util):.0f}%, peak {max(util):.0f}%, "
+            f"idle (<5%) {idle * 100:.0f}% of the time"
+        )
+    if used:
+        cap = f" of {max(total_mib):.0f} MiB" if total_mib else ""
+        parts.append(f"memory peak {max(used):.0f} MiB{cap}")
+    lines += ["; ".join(parts) + ".", ""]
+
+if srv_rows:
+    rates = [value for value in numbers(srv_rows, "generation_tok_per_s") if value > 0]
+    queued = numbers(srv_rows, "requests_waiting")
+    unreachable = sum(1 for row in srv_rows if row.get("status") != "ok")
+    parts = [f"{len(srv_rows)} server sample(s)"]
+    if rates:
+        parts.append(
+            f"generation mean {sum(rates) / len(rates):.0f} tok/s, peak {max(rates):.0f} tok/s"
+        )
+    if queued:
+        parts.append(f"queue peak {max(queued):.0f} request(s)")
+    if unreachable:
+        parts.append(f"**{unreachable} sample(s) could not reach the server**")
+    lines += [
+        "; ".join(parts) + ".",
+        "",
+        "Full timelines in `logs/gpu_timeline.csv` and `logs/server_timeline.csv`.",
+        "",
+    ]
+
 # Resistance prediction: the table the whole run exists to produce.
 metric_rows = []
 for path in sorted(run.glob("tb_resistance_*.json")):
@@ -193,11 +284,69 @@ lines += [
     "| `tb_cohort.json` | the isolate/phenotype join the predictions sampled from |",
     "| `run_metadata.json` | model, commit, seed, host — what the numbers are of |",
     "| `logs/` | the full stdout of every stage |",
+    "| `logs/stages.jsonl` | per stage: exit code, start time, duration |",
+    "| `logs/gpu_timeline.csv` | utilisation, memory, power and temperature per tick |",
+    "| `logs/server_timeline.csv` | vLLM requests running/queued, KV cache, tok/s |",
     "",
 ]
 
 (run / "SUMMARY.md").write_text("\n".join(lines))
 print(f"Wrote {run / 'SUMMARY.md'}")
+
+# One line per run in results/runs.csv, so every run that ever finished is
+# accounted for in one place — including the ones that failed, which are
+# otherwise only visible by opening each folder in turn. Rewritten by run_id
+# rather than appended, so re-running this on a folder corrects its row
+# instead of adding a duplicate.
+ledger = run.parent / "runs.csv"
+fields = [
+    "run_id", "started_at", "model", "effort", "drugs", "isolates_per_drug",
+    "seed", "host", "slurm_job_id", "git_commit", "stages_ok", "stages_failed",
+    "seconds", "gpu_util_mean", "gpu_mem_peak_mib", "tok_per_s_mean", "folder",
+]
+
+
+def mean(values):
+    return f"{sum(values) / len(values):.1f}" if values else ""
+
+
+util_all = numbers(gpu_rows, "util_gpu_pct")
+mem_all = numbers(gpu_rows, "mem_used_mib")
+rate_all = [value for value in numbers(srv_rows, "generation_tok_per_s") if value > 0]
+
+row = {
+    "run_id": meta.get("run_id", run.name),
+    "started_at": meta.get("started_at", ""),
+    "model": meta.get("model", ""),
+    "effort": meta.get("reasoning_effort", ""),
+    "drugs": " ".join(meta.get("drugs") or []),
+    "isolates_per_drug": meta.get("isolates_per_drug", ""),
+    "seed": meta.get("seed", ""),
+    "host": meta.get("host", ""),
+    "slurm_job_id": meta.get("slurm_job_id") or "",
+    "git_commit": (meta.get("git_commit") or "")[:12],
+    "stages_ok": sum(1 for r in stage_records if r.get("status") == "ok"),
+    "stages_failed": ",".join(
+        r.get("stage", "?") for r in stage_records if r.get("status") != "ok"
+    ),
+    "seconds": sum(r.get("seconds") or 0 for r in stage_records),
+    "gpu_util_mean": mean(util_all),
+    "gpu_mem_peak_mib": f"{max(mem_all):.0f}" if mem_all else "",
+    "tok_per_s_mean": mean(rate_all),
+    "folder": run.name,
+}
+
+existing = []
+if ledger.exists():
+    with open(ledger, newline="") as handle:
+        existing = [r for r in csv.DictReader(handle) if r.get("run_id") != row["run_id"]]
+with open(ledger, "w", newline="") as handle:
+    writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for old_row in existing:
+        writer.writerow({key: old_row.get(key, "") for key in fields})
+    writer.writerow(row)
+print(f"Wrote {ledger} ({len(existing) + 1} run(s))")
 if metric_rows:
     print(f"Wrote {run / 'metrics.csv'} ({len(metric_rows)} drug(s))")
 PY

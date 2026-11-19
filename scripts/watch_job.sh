@@ -67,7 +67,14 @@ while :; do
     RUN_DIR="$(ls -dt "${REPO}"/results/*"${JOB}"* 2>/dev/null | head -1)"
     if [ -n "${RUN_DIR}" ]; then
         printf '\n--- %s ---\n' "${RUN_DIR#${REPO}/}"
-        ls -lt "${RUN_DIR}" | tail -n +2 | head -8
+
+        # Stages done and how long each took, plus the sampler's last few
+        # ticks: the card and the server as of seconds ago, without having to
+        # ssh to the node to ask.
+        "${REPO}/scripts/monitor_run.sh" status "${RUN_DIR}" 2>/dev/null \
+            | sed 's/^/  /'
+
+        ls -lt "${RUN_DIR}" | tail -n +2 | head -5
     fi
 
     if [ -n "${LOG}" ]; then

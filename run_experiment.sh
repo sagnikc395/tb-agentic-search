@@ -108,23 +108,53 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         --format=csv > "${RUN_DIR}/logs/gpu.txt" 2>&1 || true
 fi
 
+# Every run is sampled while it runs, not just summarised after it. The trap
+# covers the failure paths too — a stage that dies, a preemption, a Ctrl-C on a
+# login node — so no run leaves a sampler behind holding the folder open.
+BASE_URL="${BASE_URL}" "${REPO}/scripts/monitor_run.sh" start "${RUN_DIR}" || true
+trap '"${REPO}/scripts/monitor_run.sh" stop "${RUN_DIR}" >/dev/null 2>&1 || true' EXIT
+
 # Stage results are collected here rather than failing the run, so one bad drug
 # does not cost the others.
 STATUS_FILE="${RUN_DIR}/logs/stages.txt"
 : > "${STATUS_FILE}"
+# stages.txt stays the two-column file everything already reads; the JSONL
+# beside it is the one with the numbers you need when a run was slow rather
+# than wrong — when each stage started, how long it took, what it exited with.
+STAGE_LOG="${RUN_DIR}/logs/stages.jsonl"
+: > "${STAGE_LOG}"
 
 stage() {
     # stage <name> <logfile> <command...>
     local name="$1" log="$2"
     shift 2
+    local started elapsed code status
+    started="$(date +%s)"
     echo
-    echo "=== ${name} ==="
-    if "$@" 2>&1 | tee "${RUN_DIR}/logs/${log}"; then
-        echo "${name}	ok" >> "${STATUS_FILE}"
+    echo "=== ${name}  ($(date '+%H:%M:%S')) ==="
+    # errexit off for exactly this pipeline: a failing stage is recorded and
+    # the run continues, which is the whole point of collecting status here.
+    # PIPESTATUS, not $?, because the last element is always tee succeeding —
+    # and `|| true` cannot be used instead, since it overwrites PIPESTATUS.
+    set +e
+    "$@" 2>&1 | tee "${RUN_DIR}/logs/${log}"
+    code="${PIPESTATUS[0]}"
+    set -e
+    elapsed=$(( $(date +%s) - started ))
+    if [ "${code}" -eq 0 ]; then
+        status="ok"
     else
-        echo "${name}	FAILED" >> "${STATUS_FILE}"
-        echo "!! ${name} failed; see logs/${log}. Continuing."
+        status="FAILED"
+        echo "!! ${name} failed (exit ${code}) after ${elapsed}s; see logs/${log}. Continuing."
     fi
+    echo "${name}	${status}" >> "${STATUS_FILE}"
+    printf '{"stage": "%s", "status": "%s", "exit_code": %s, "started_at": "%s", "seconds": %s, "log": "%s"}\n' \
+        "${name}" "${status}" "${code}" \
+        "$(date -d "@${started}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
+            || date -r "${started}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)" \
+        "${elapsed}" "${log}" >> "${STAGE_LOG}"
+    echo "--- ${name}: ${status} in ${elapsed}s ---"
+    "${REPO}/scripts/monitor_run.sh" status "${RUN_DIR}" 2>/dev/null || true
 }
 
 COMMON=(--base-url "${BASE_URL}" --model "${MODEL}" --source Custom)
@@ -156,7 +186,9 @@ else
     echo "screening	skipped" >> "${STATUS_FILE}"
 fi
 
-# 4. Turn the run folder into something readable.
+# 4. Turn the run folder into something readable. The sampler stops first, so
+# collect_results.sh summarises a finished timeline rather than a moving one.
+"${REPO}/scripts/monitor_run.sh" stop "${RUN_DIR}" || true
 "${REPO}/scripts/collect_results.sh" "${RUN_DIR}"
 
 # Summarise first, then fail: a partial run is still worth packaging, but the

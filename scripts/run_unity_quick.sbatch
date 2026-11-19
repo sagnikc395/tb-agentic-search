@@ -2,7 +2,7 @@
 #SBATCH --job-name=tb-quick
 #SBATCH --partition=gpu-preempt
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=vram23
+#SBATCH --constraint="vram23&[sm_80|sm_86|sm_89|sm_90]"
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
@@ -16,11 +16,21 @@
 #   partition   gpu-preempt, not gpu-highvram — preemptible, so far shorter
 #               queue. --requeue above puts the job straight back in line if it
 #               is killed, and a rerun starts the run from the top.
-#   gpu         gpu:1 + vram23, not gpu:a100:1 — any card with >=23 GB, which
-#               is the largest pool on the cluster rather than a handful of
-#               nodes. A 4-bit 14B is ~9 GB of weights, so it fits with room
-#               for the KV cache. `sinfo -o '%P %G %f'` is what settles the
-#               feature name if vram23 is ever renamed or missing.
+#   gpu         gpu:1 + vram23 + Ampere-or-newer, not gpu:a100:1 — any recent
+#               card with >=23 GB, which is a far larger pool than the A100
+#               nodes rather than a handful of them. A 4-bit 14B is ~9 GB of
+#               weights, so it fits with room for the KV cache.
+#
+#               The architecture half of that constraint is not optional. The
+#               vram23 pool includes the Tesla M40 24GB, which is Maxwell
+#               (sm_52): vLLM needs sm_70 to start at all, and the awq_marlin
+#               kernel that reads these 4-bit weights needs sm_80. Land on an
+#               M40 and the job spends ten minutes building the venv and then
+#               dies at `vllm serve` on an unsupported device. The sm_* list
+#               above is Ampere, Ada and Hopper; add sm_70/sm_75 only with a
+#               non-AWQ model, since those cards fall back to the slow AWQ
+#               path. `sinfo -o '%P %G %f'` settles the feature names if any
+#               of them are ever renamed.
 #   time        2h, not 8h. Short jobs slot into gaps before the next big
 #               reservation; this is usually the single biggest win.
 #   cpu/mem     4 cores and 32G. vLLM at TP=1 is GPU-bound and the weights

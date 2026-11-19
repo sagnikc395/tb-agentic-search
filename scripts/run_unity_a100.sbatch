@@ -68,6 +68,32 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-1200}"
 mkdir -p logs
 module load cuda/12.6 2>/dev/null || true
 
+# Check the card before building anything. --constraint can only filter on the
+# features a partition happens to publish, and a request for ">=23 GB" matches
+# the Tesla M40 24GB, which is Maxwell (sm_52). vLLM requires sm_70 to start
+# and awq_marlin requires sm_80, so on such a card the job would install a
+# venv for ten minutes and then die inside `vllm serve` with a device-support
+# error buried under the engine traceback. Fail here instead, by name, while
+# the log is still short enough to read.
+MIN_CC="${MIN_CC:-80}"
+CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)"
+if [ -n "${CAP}" ]; then
+    CAP_NUM="${CAP/./}"
+    if [ "${CAP_NUM}" -lt "${MIN_CC}" ]; then
+        GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+        echo "Allocated ${GPU_NAME} (compute capability ${CAP}) on $(hostname)." >&2
+        echo "This pipeline needs sm_$((MIN_CC)) or newer: vLLM will not start" >&2
+        echo "below sm_70, and the awq_marlin kernel for 4-bit weights needs" >&2
+        echo "sm_80. Resubmit against a newer card, e.g." >&2
+        echo '  sbatch --constraint="vram23&[sm_80|sm_86|sm_89|sm_90]" scripts/run_unity_quick.sbatch' >&2
+        echo "(MIN_CC=70 relaxes this check for a non-AWQ model.)" >&2
+        exit 1
+    fi
+    echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) (sm_${CAP_NUM})"
+else
+    echo "Warning: no nvidia-smi output; skipping the GPU capability check." >&2
+fi
+
 # The venv holding vLLM, built once. autoawq is what reads the 4-bit weights.
 if [ ! -x "${VLLM_VENV}/bin/vllm" ]; then
     echo "Installing vLLM into ${VLLM_VENV} (first run only)..."

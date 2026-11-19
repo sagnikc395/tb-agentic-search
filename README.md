@@ -51,6 +51,29 @@ changes when the server lives on a compute node.
 ## Running the whole experiment
 
 ```bash
+./run.sh            # the quick job: one drug, 8 isolates, 2h cap
+./run.sh full       # the full four-drug run on an A100
+```
+
+Then wait. `run.sh` submits the job, prints why it is still pending while it
+is, follows the log once it starts, and ends by printing the run's summary and
+the folder and tarball to send on. Ctrl-C detaches without cancelling the job;
+`./run.sh --attach <jobid>` picks it back up, and `scancel <jobid>` is the way
+to actually stop it. It checks for `uv`, the job script and the resistance
+table before submitting, so the usual reasons a job dies ten minutes in show
+up on your terminal instead of at the bottom of a log.
+
+Everything below still works and `run.sh` passes it through:
+
+```bash
+DRUGS="rifampicin isoniazid" LIMIT=20 ./run.sh full
+QUICK_LIMIT=4 ./run.sh
+```
+
+`run_experiment.sh` is the layer underneath — the three stages themselves —
+and can still be run directly:
+
+```bash
 ./run_experiment.sh
 ```
 
@@ -71,6 +94,30 @@ calls it at the end, and you can re-run it on any run folder:
 ```bash
 scripts/collect_results.sh                    # the newest run
 scripts/collect_results.sh results/<run-id>   # a particular one
+```
+
+Every run is also sampled while it runs. `scripts/monitor_run.sh` is started
+and stopped by `run_experiment.sh`, and writes two timelines into the run's
+`logs/`: `gpu_timeline.csv` (utilisation, memory, power, temperature) and
+`server_timeline.csv` (vLLM's requests running and queued, KV-cache occupancy
+and generation tokens per second). `logs/stages.jsonl` records each stage's
+exit code, start time and duration beside them. These answer the question the
+stage logs cannot — whether a slow run was slow because the card was saturated
+or because it sat idle waiting on the agent — and `SUMMARY.md` carries the
+headline figures under **Run monitoring**.
+
+`results/runs.csv` is one row per run across every run that has finished,
+successful or not: model, effort, seed, commit, which stages failed, total
+time, mean GPU utilisation and mean tokens per second. It is rewritten by
+run id, so re-running `collect_results.sh` on a folder corrects that run's row
+rather than adding another.
+
+To watch a Slurm job, including the live timelines and stage durations:
+
+```bash
+scripts/watch_job.sh              # the newest job of yours in the queue
+scripts/watch_job.sh 1234567      # a particular one
+scripts/monitor_run.sh status results/<run-id>    # just the last samples
 ```
 
 The knobs are environment variables, so the defaults stay out of the command:
@@ -570,12 +617,17 @@ is reported per batch or per isolate instead of ending the run.
 ## Layout
 
 ```
-run_experiment.sh  the whole experiment, one command; writes results/<run-id>/
+run.sh             submit, wait, follow, summarise — the one to run
+run_experiment.sh  the three stages themselves; writes results/<run-id>/
 cli.py             CLI entry point
 scripts/
   run_unity_a100.sbatch     one Slurm job: serve the quantized model on a Unity
                             A100, then run the pipeline against it
+  run_unity_quick.sbatch    the same experiment on any Ampere-or-newer card
+                            with >=23 GB, sized to clear the queue faster
   collect_results.sh        SUMMARY.md, metrics.csv and a tarball for a run folder
+  monitor_run.sh            samples the GPU and the vLLM server during a run
+  watch_job.sh              queue state, stage progress and timelines, refreshed
 tb_search/
   config.py        Settings loaded from .env / environment: which local backend, which model
   reasoning.py     reasoning effort, and pulling a reply's thinking out of it
