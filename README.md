@@ -1,10 +1,5 @@
 # tb-knowledge-discovery
 
-![flow-1](./assets/v2-1.png)
-![flow-2](./assets/v2-2.png)
-![flow-3](./assets/v2-3.png)
-![relevance_check](./assets/paper_relevance_check.png)
-
 Three capabilities, each one a run of the
 [Biomni](https://github.com/snap-stanford/Biomni) A1 agent against a model you
 serve yourself — vLLM on the cluster, or Ollama locally (see
@@ -50,10 +45,61 @@ changes when the server lives on a compute node.
 
 ## Running the whole experiment
 
+From a Unity login node:
+
 ```bash
-./run.sh            # the quick job: one drug, 8 isolates, 2h cap
+module load uv      # run.sh's preflight fails without uv on PATH
+uv sync             # once
 ./run.sh full       # the full four-drug run on an A100
+./run.sh            # or the quick job: one drug, 8 isolates, 2h cap
 ```
+
+That is the whole happy path — submit, serve the model, run the three stages,
+package the results. No `.env` is needed; the job script passes `BASE_URL` and
+`MODEL` to the pipeline itself.
+
+Three things it does not do for you.
+
+**The first run pays for the venv and the weights, inside the job.**
+`run_unity_a100.sbatch` builds `~/vllm-venv` with `pip install vllm autoawq`
+(~10 min), and then vLLM pulls `Qwen/Qwen3-32B-AWQ` — ~18 GB — into the default
+HuggingFace cache under `$HOME`, which is both slow and more than a Unity home
+quota wants to hold. Point it at work or project space first, once:
+
+```bash
+export HF_HOME=/work/pi_annagreen_umass_edu/$USER/hf
+```
+
+Doing that download in a throwaway `./run.sh` means the full job starts serving
+in a couple of minutes instead of spending half an hour of its walltime on
+setup.
+
+**The VCFs have to be readable from the node.** `big_tb_file_paths.txt` records
+them under `/project/pi_annagreen_umass_edu/anna/BIG-TB_v2/isolates/`, so the
+run needs read access to that project space and those paths need to still be
+valid; `VCF_ROOT=/path/to/vcfs ./run.sh full` if they have moved. The cohort
+join is the cheap way to check, because no model is involved:
+
+```bash
+uv run cli.py --cohort -o /tmp/cohort.json
+```
+
+**`./run.sh full` is not the full cohort.** It is four drugs at `LIMIT=20`
+balanced isolates — 80 predictions — not the 17,942 isolates in the path list.
+For a real sample size, say so:
+
+```bash
+DRUGS="rifampicin isoniazid ethambutol pyrazinamide streptomycin amikacin" \
+LIMIT=100 ./run.sh full
+```
+
+and that will not fit the job's 8 h walltime. Each prediction is a multi-step
+A1 run carrying a ~35k-token system prompt on every step, so take the
+per-prediction time from a quick run's log before scaling, then either raise the
+walltime (`SBATCH_ARGS="--time=24:00:00"`) or split the drugs across separate
+jobs with their own `RUN_ID`. Coverage limits the drug list too: rifampicin and
+isoniazid have ~17.5k labelled isolates, but the rarely tested drugs have a few
+dozen, so a large `--limit` with `--balance` quietly returns fewer for those.
 
 Then wait. `run.sh` submits the job, prints why it is still pending while it
 is, follows the log once it starts, and ends by printing the run's summary and
