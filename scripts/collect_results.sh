@@ -13,6 +13,12 @@
 # The raw JSON stays exactly as the pipeline wrote it — every prediction with
 # its variants and its reasoning trace — because the summary is for reading and
 # the JSON is what anyone would re-check it against.
+#
+# What a run cost is summarised from logs/groq_usage.jsonl, which tb_search.usage
+# wrote as the run made its requests: tokens in and out, how much of the output
+# was thinking, how long Groq queued each request, and every second spent
+# waiting out a rate limit. On our own server this section was GPU utilisation
+# and KV-cache occupancy; the question it answers is the same one.
 
 set -euo pipefail
 
@@ -52,6 +58,7 @@ lines += [
     "| | |",
     "| --- | --- |",
     f"| started | {meta.get('started_at', '—')} |",
+    f"| provider | {meta.get('provider', 'Groq')} |",
     f"| model | `{meta.get('model', '—')}` |",
     f"| reasoning effort | {meta.get('reasoning_effort', '—')} |",
     f"| isolates per drug | {meta.get('isolates_per_drug', '—')}"
@@ -63,12 +70,6 @@ lines += [
     f"{' (uncommitted changes)' if meta.get('git_dirty') else ''} |",
     "",
 ]
-
-gpu = run / "logs" / "gpu.txt"
-if gpu.exists():
-    card = [line for line in gpu.read_text().splitlines() if line.strip()][1:]
-    if card:
-        lines += [f"GPU: {'; '.join(card)}", ""]
 
 stages = run / "logs" / "stages.txt"
 if stages.exists():
@@ -82,8 +83,8 @@ if stages.exists():
 
 
 def read_csv(path):
-    """The monitor's timelines. A row mid-write is dropped rather than raising:
-    this runs while a preempted run's last sample may be half-flushed."""
+    """The monitor's timeline. A row mid-write is dropped rather than raising:
+    this runs while an interrupted run's last sample may be half-flushed."""
     if not path.exists():
         return []
     with open(path, newline="") as handle:
@@ -91,20 +92,10 @@ def read_csv(path):
         return [row for row in reader if row.get("timestamp")]
 
 
-def numbers(rows, key):
-    out = []
-    for row in rows:
-        try:
-            out.append(float(row[key]))
-        except (TypeError, ValueError, KeyError):
-            pass
-    return out
-
-
 # What the run did while it ran, as opposed to what it produced. A stage table
 # with durations is the first thing to look at when a run finished but took the
-# whole walltime, and the GPU/throughput lines say whether the time went into
-# the model or into waiting on it.
+# whole walltime, and the usage lines below say whether the time went into the
+# model's thinking or into waiting out the rate limit.
 stage_records = []
 jsonl = run / "logs" / "stages.jsonl"
 if jsonl.exists():
@@ -114,10 +105,28 @@ if jsonl.exists():
         except ValueError:
             pass
 
-gpu_rows = read_csv(run / "logs" / "gpu_timeline.csv")
-srv_rows = read_csv(run / "logs" / "server_timeline.csv")
+groq_rows = read_csv(run / "logs" / "groq_timeline.csv")
 
-if stage_records or gpu_rows or srv_rows:
+
+def usage_events():
+    """Every request and wait the run recorded, skipping a half-written line."""
+    events = []
+    path = run / "logs" / "groq_usage.jsonl"
+    if not path.exists():
+        return events
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    return events
+
+
+events = usage_events()
+requests = [e for e in events if e.get("event") == "completion"]
+waits = [e for e in events if e.get("event") == "wait"]
+
+if stage_records or requests or groq_rows:
     lines += ["## Run monitoring", ""]
 
 if stage_records:
@@ -135,39 +144,67 @@ if stage_records:
         )
     lines += ["", f"Total stage time: {total // 60:.0f}m{total % 60:02.0f}s.", ""]
 
-if gpu_rows:
-    util = numbers(gpu_rows, "util_gpu_pct")
-    used = numbers(gpu_rows, "mem_used_mib")
-    total_mib = numbers(gpu_rows, "mem_total_mib")
-    parts = [f"{len(gpu_rows)} GPU sample(s)"]
-    if util:
-        idle = sum(1 for value in util if value < 5) / len(util)
-        parts.append(
-            f"utilisation mean {sum(util) / len(util):.0f}%, peak {max(util):.0f}%, "
-            f"idle (<5%) {idle * 100:.0f}% of the time"
-        )
-    if used:
-        cap = f" of {max(total_mib):.0f} MiB" if total_mib else ""
-        parts.append(f"memory peak {max(used):.0f} MiB{cap}")
-    lines += ["; ".join(parts) + ".", ""]
+if requests or waits:
 
-if srv_rows:
-    rates = [value for value in numbers(srv_rows, "generation_tok_per_s") if value > 0]
-    queued = numbers(srv_rows, "requests_waiting")
-    unreachable = sum(1 for row in srv_rows if row.get("status") != "ok")
-    parts = [f"{len(srv_rows)} server sample(s)"]
-    if rates:
-        parts.append(
-            f"generation mean {sum(rates) / len(rates):.0f} tok/s, peak {max(rates):.0f} tok/s"
-        )
-    if queued:
-        parts.append(f"queue peak {max(queued):.0f} request(s)")
-    if unreachable:
-        parts.append(f"**{unreachable} sample(s) could not reach the server**")
+    def tally(key, rows=None):
+        rows = requests if rows is None else rows
+        return sum(row.get(key) or 0 for row in rows)
+
+    def average(key, rows=None):
+        rows = requests if rows is None else rows
+        values = [row[key] for row in rows if isinstance(row.get(key), (int, float))]
+        return sum(values) / len(values) if values else None
+
+    prompt_tokens = tally("prompt_tokens")
+    completion_tokens = tally("completion_tokens")
+    reasoning_tokens = tally("reasoning_tokens")
+    waited = tally("seconds", waits)
+    stage_seconds = sum(r.get("seconds") or 0 for r in stage_records)
+
     lines += [
-        "; ".join(parts) + ".",
+        "| | |",
+        "| --- | --- |",
+        f"| requests to Groq | {len(requests)} |",
+        f"| tokens in / out | {prompt_tokens:,} / {completion_tokens:,} |",
+        f"| of the output, thinking | {reasoning_tokens:,}"
+        f"{f' ({reasoning_tokens / completion_tokens * 100:.0f}%)' if completion_tokens else ''} |",
+        f"| mean tokens per request | {prompt_tokens // len(requests):,} in"
+        f", {completion_tokens // len(requests):,} out |"
+        if requests
+        else "| mean tokens per request | — |",
+    ]
+    queue = average("queue_time")
+    served = average("total_time")
+    if queue is not None:
+        lines.append(f"| mean time queued at Groq | {queue:.2f}s |")
+    if served is not None:
+        lines.append(f"| mean time per request | {served:.2f}s |")
+    lines += [
+        f"| waited out rate limits | {waited // 60:.0f}m{waited % 60:02.0f}s"
+        f" over {len(waits)} wait(s)"
+        f"{f', {waited / stage_seconds * 100:.0f}% of the run' if stage_seconds else ''} |",
         "",
-        "Full timelines in `logs/gpu_timeline.csv` and `logs/server_timeline.csv`.",
+    ]
+    # The two readings this table exists to separate. Which one a slow run is
+    # decides what to change: the effort, or the batch size and the tier.
+    if waited and stage_seconds and waited / stage_seconds > 0.2:
+        lines += [
+            "A fifth or more of this run was spent waiting out rate limits, so "
+            "its wall time says more about the account's limits than about the "
+            "model. Fewer isolates in flight, or a higher tier, is the lever — "
+            "not a lower reasoning effort.",
+            "",
+        ]
+    elif completion_tokens and reasoning_tokens / completion_tokens > 0.6:
+        lines += [
+            "Most of the output was thinking rather than answer, which is what "
+            "the reasoning effort buys and what the traces are made of. "
+            "`--reasoning-effort` is the lever on the run's cost.",
+            "",
+        ]
+    lines += [
+        "Per-tick timeline in `logs/groq_timeline.csv`; every request and wait "
+        "in `logs/groq_usage.jsonl`.",
         "",
     ]
 
@@ -285,8 +322,8 @@ lines += [
     "| `run_metadata.json` | model, commit, seed, host — what the numbers are of |",
     "| `logs/` | the full stdout of every stage |",
     "| `logs/stages.jsonl` | per stage: exit code, start time, duration |",
-    "| `logs/gpu_timeline.csv` | utilisation, memory, power and temperature per tick |",
-    "| `logs/server_timeline.csv` | vLLM requests running/queued, KV cache, tok/s |",
+    "| `logs/groq_timeline.csv` | per tick: requests, tokens in/out, thinking, queue time, rate-limit waits |",
+    "| `logs/groq_usage.jsonl` | one line per Groq request and per rate-limit wait |",
     "",
 ]
 
@@ -302,17 +339,16 @@ ledger = run.parent / "runs.csv"
 fields = [
     "run_id", "started_at", "model", "effort", "drugs", "isolates_per_drug",
     "seed", "host", "slurm_job_id", "git_commit", "stages_ok", "stages_failed",
-    "seconds", "gpu_util_mean", "gpu_mem_peak_mib", "tok_per_s_mean", "folder",
+    "seconds", "requests", "prompt_tokens", "completion_tokens",
+    "reasoning_tokens", "mean_queue_s", "rate_limit_wait_s", "folder",
 ]
 
 
-def mean(values):
-    return f"{sum(values) / len(values):.1f}" if values else ""
+def summed(key, rows):
+    return sum(row.get(key) or 0 for row in rows)
 
 
-util_all = numbers(gpu_rows, "util_gpu_pct")
-mem_all = numbers(gpu_rows, "mem_used_mib")
-rate_all = [value for value in numbers(srv_rows, "generation_tok_per_s") if value > 0]
+queued = [r["queue_time"] for r in requests if isinstance(r.get("queue_time"), (int, float))]
 
 row = {
     "run_id": meta.get("run_id", run.name),
@@ -330,9 +366,12 @@ row = {
         r.get("stage", "?") for r in stage_records if r.get("status") != "ok"
     ),
     "seconds": sum(r.get("seconds") or 0 for r in stage_records),
-    "gpu_util_mean": mean(util_all),
-    "gpu_mem_peak_mib": f"{max(mem_all):.0f}" if mem_all else "",
-    "tok_per_s_mean": mean(rate_all),
+    "requests": len(requests),
+    "prompt_tokens": summed("prompt_tokens", requests),
+    "completion_tokens": summed("completion_tokens", requests),
+    "reasoning_tokens": summed("reasoning_tokens", requests),
+    "mean_queue_s": f"{sum(queued) / len(queued):.2f}" if queued else "",
+    "rate_limit_wait_s": f"{summed('seconds', waits):.0f}",
     "folder": run.name,
 }
 

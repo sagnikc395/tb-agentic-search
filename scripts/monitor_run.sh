@@ -1,6 +1,6 @@
 #!/bin/bash
-# Sample a run while it is happening, so every run leaves a record of what the
-# card and the server were doing and not just what the pipeline printed.
+# Sample a run while it is happening, so every run leaves a record of what Groq
+# was doing for it and not just what the pipeline printed.
 #
 #   scripts/monitor_run.sh start results/<run-id>   # background sampler
 #   scripts/monitor_run.sh stop  results/<run-id>   # stop it
@@ -10,22 +10,25 @@
 # to run by hand for a normal run. Started twice on the same folder the second
 # call is a no-op, which is what makes it safe to call from a requeued job.
 #
-# Two files land in <run-id>/logs/:
+# On a model we served ourselves this sampled the card and vLLM's own metrics
+# endpoint. Groq publishes neither to us: the only record of what a request cost
+# is the response we already received, so tb_search.usage files each one into
+# <run-id>/logs/groq_usage.jsonl and this script rolls that up per tick. One
+# file lands in <run-id>/logs/:
 #
-#   gpu_timeline.csv     utilisation, memory, power and temperature per tick.
+#   groq_timeline.csv    per tick: requests completed, tokens in and out, how
+#                        much of the output was thinking, mean queue time, and
+#                        the seconds the run spent waiting out a rate limit.
 #                        The question it answers is the one a stage log cannot:
-#                        a run that is slow because the card is pinned at 100%
-#                        is a different problem from one that is slow because
-#                        the card is idle waiting on the agent's tool calls.
-#   server_timeline.csv  vLLM's own counters off its Prometheus endpoint:
-#                        requests running and queued, KV-cache occupancy, and
-#                        generation tokens per second derived from the token
-#                        counter between ticks. A queue that grows while
-#                        throughput is flat means the KV cache is the ceiling,
-#                        which is a GPU_UTIL or MAX_MODEL_LEN decision.
+#                        a run that is slow because the model is thinking hard
+#                        (completion tokens up, queue time flat) is a different
+#                        problem from one that is slow because the account is
+#                        throttled (queue time and wait seconds up), and the
+#                        second is fixed by a smaller batch or a higher tier
+#                        rather than by a lower effort.
 #
-# Both are plain CSV with a header, appended to, so a preempted-and-requeued
-# job adds to the same timeline rather than starting a new one.
+# It is plain CSV with a header, appended to, so a requeued job adds to the same
+# timeline rather than starting a new one.
 
 set -uo pipefail
 
@@ -40,67 +43,86 @@ fi
 RUN_DIR="${RUN_DIR%/}"
 LOG_DIR="${RUN_DIR}/logs"
 PID_FILE="${LOG_DIR}/monitor.pid"
-GPU_CSV="${LOG_DIR}/gpu_timeline.csv"
-SRV_CSV="${LOG_DIR}/server_timeline.csv"
+GROQ_CSV="${LOG_DIR}/groq_timeline.csv"
+# Where tb_search.usage writes; run_experiment.sh exports the same path.
+USAGE_LOG="${TB_SEARCH_USAGE_LOG:-${LOG_DIR}/groq_usage.jsonl}"
 
-# BASE_URL is the OpenAI-compatible path; the metrics endpoint sits beside it
-# at the server root, not under /v1.
-METRICS_URL="${MONITOR_METRICS_URL:-${BASE_URL:-http://localhost:8000/v1}}"
-METRICS_URL="${METRICS_URL%/}"
-METRICS_URL="${METRICS_URL%/v1}/metrics"
-
-sample_gpu() {
-    # One row per GPU per tick. nounits keeps the CSV numeric so anything can
-    # read it without stripping " MiB" off every field.
+sample_groq() {
+    # One row per tick, covering the requests that finished since the last one.
+    # The reader is python because the source is JSONL, and it has to tolerate
+    # a last line that is still being written.
     local stamp="$1"
-    nvidia-smi --query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
-        --format=csv,noheader,nounits 2>/dev/null \
-        | sed "s/^/${stamp}, /" \
-        | tr -d ' ' | sed 's/,/, /g' >> "${GPU_CSV}"
-}
+    python3 - "${USAGE_LOG}" "${GROQ_CSV}" "${stamp}" "${LOG_DIR}/monitor.offset" <<'PYEOF'
+import json, pathlib, sys
 
-sample_server() {
-    # vLLM publishes counters, not rates, so tokens/s is the delta between this
-    # tick and the last one. State lives in these two globals rather than a
-    # file: a restarted monitor just records one empty rate and carries on.
-    local stamp="$1" body
-    body="$(curl -sf --max-time 5 "${METRICS_URL}" 2>/dev/null)" || {
-        echo "${stamp}, , , , , , unreachable" >> "${SRV_CSV}"
-        return
-    }
+usage, csv_path, offset_path = (pathlib.Path(p) for p in (sys.argv[1], sys.argv[2], sys.argv[4]))
+stamp = sys.argv[3]
 
-    local running waiting cache prompt gen
-    running="$(metric "${body}" vllm:num_requests_running)"
-    waiting="$(metric "${body}" vllm:num_requests_waiting)"
-    cache="$(metric "${body}" vllm:gpu_cache_usage_perc)"
-    prompt="$(metric "${body}" vllm:prompt_tokens_total)"
-    gen="$(metric "${body}" vllm:generation_tokens_total)"
+# Only the lines that are new since the last tick, so every row is a rate over
+# that tick rather than a running total. The offset is a byte count, which is
+# also how a half-written final line is left for the next tick: it is not
+# counted as consumed.
+start = 0
+if offset_path.exists():
+    try:
+        start = int(offset_path.read_text().strip() or 0)
+    except ValueError:
+        start = 0
 
-    local now rate=""
-    now="$(date +%s)"
-    if [ -n "${gen}" ] && [ -n "${LAST_GEN}" ] && [ -n "${LAST_TIME}" ]; then
-        rate="$(awk -v a="${gen}" -v b="${LAST_GEN}" -v t="${now}" -v u="${LAST_TIME}" \
-            'BEGIN { d = t - u; if (d > 0 && a >= b) printf "%.1f", (a - b) / d }')"
-    fi
-    LAST_GEN="${gen}"
-    LAST_TIME="${now}"
+if not usage.exists():
+    sys.exit(0)
 
-    echo "${stamp}, ${running}, ${waiting}, ${cache}, ${gen}, ${rate}, ok" >> "${SRV_CSV}"
-    # Printed, not just filed: this is the line that tells someone tailing the
-    # job log that the model is generating rather than wedged.
-    echo "[monitor ${stamp}] running=${running:-?} queued=${waiting:-?} kv=${cache:-?} tok/s=${rate:-?}"
-}
+with open(usage, "rb") as handle:
+    handle.seek(start)
+    chunk = handle.read()
 
-metric() {
-    # The last field of the first non-comment line whose name matches. vLLM
-    # labels every series with model_name=..., so an exact-match grep would
-    # never hit; anchoring on the name and a following { or space does.
-    awk -v name="$2" '
-        /^#/ { next }
-        index($0, name) == 1 {
-            c = substr($0, length(name) + 1, 1)
-            if (c == "{" || c == " ") { print $NF; exit }
-        }' <<< "$1"
+complete, _, _ = chunk.rpartition(b"\n")
+if complete:
+    offset_path.write_text(str(start + len(complete) + 1))
+
+events = []
+for line in complete.decode("utf-8", "replace").splitlines():
+    try:
+        events.append(json.loads(line))
+    except ValueError:
+        continue
+
+requests = [e for e in events if e.get("event") == "completion"]
+waits = [e for e in events if e.get("event") == "wait"]
+
+
+def total(key, rows):
+    return sum(row.get(key) or 0 for row in rows)
+
+
+def mean(key, rows):
+    values = [row[key] for row in rows if isinstance(row.get(key), (int, float))]
+    return sum(values) / len(values) if values else ""
+
+
+row = [
+    stamp,
+    str(len(requests)),
+    str(total("prompt_tokens", requests)),
+    str(total("completion_tokens", requests)),
+    str(total("reasoning_tokens", requests)),
+    f"{mean('queue_time', requests):.2f}" if requests else "",
+    f"{mean('total_time', requests):.2f}" if requests else "",
+    f"{total('seconds', waits):.0f}",
+]
+with open(csv_path, "a") as handle:
+    handle.write(", ".join(row) + "\n")
+
+# Printed, not just filed: this is the line that tells someone tailing the job
+# log that the run is making requests rather than wedged.
+print(
+    f"[monitor {stamp}] requests={len(requests)} "
+    f"in={total('prompt_tokens', requests)} out={total('completion_tokens', requests)} "
+    f"thinking={total('reasoning_tokens', requests)} "
+    f"queue={mean('queue_time', requests) or 0:.2f}s "
+    f"waited={total('seconds', waits):.0f}s"
+)
+PYEOF
 }
 
 case "${ACTION}" in
@@ -110,23 +132,19 @@ start)
         echo "Monitor already running for ${RUN_DIR} (pid $(cat "${PID_FILE}"))."
         exit 0
     fi
-    [ -s "${GPU_CSV}" ] || echo "timestamp, gpu, util_gpu_pct, util_mem_pct, mem_used_mib, mem_total_mib, power_w, temp_c" > "${GPU_CSV}"
-    [ -s "${SRV_CSV}" ] || echo "timestamp, requests_running, requests_waiting, kv_cache_usage, generation_tokens_total, generation_tok_per_s, status" > "${SRV_CSV}"
+    [ -s "${GROQ_CSV}" ] || echo "timestamp, requests, prompt_tokens, completion_tokens, reasoning_tokens, mean_queue_s, mean_total_s, rate_limit_wait_s" > "${GROQ_CSV}"
 
     # The sampler itself, backgrounded and disowned so it outlives the shell
     # that started it but still dies on `stop` or on the job's exit trap.
     (
-        LAST_GEN=""
-        LAST_TIME=""
         while :; do
             stamp="$(date '+%Y-%m-%dT%H:%M:%S')"
-            command -v nvidia-smi >/dev/null 2>&1 && sample_gpu "${stamp}"
-            sample_server "${stamp}"
+            sample_groq "${stamp}"
             sleep "${INTERVAL}"
         done
     ) &
     echo $! > "${PID_FILE}"
-    echo "Monitoring ${RUN_DIR} every ${INTERVAL}s (pid $(cat "${PID_FILE}")); metrics from ${METRICS_URL}"
+    echo "Monitoring ${RUN_DIR} every ${INTERVAL}s (pid $(cat "${PID_FILE}")); usage from ${USAGE_LOG}"
     ;;
 stop)
     if [ -f "${PID_FILE}" ]; then
@@ -160,13 +178,11 @@ for line in open(sys.argv[1]):
     )
 PYEOF
     fi
-    for csv in "${GPU_CSV}" "${SRV_CSV}"; do
-        if [ -s "${csv}" ]; then
-            printf '\n--- %s ---\n' "$(basename "${csv}")"
-            head -1 "${csv}"
-            tail -n +2 "${csv}" | tail -3
-        fi
-    done
+    if [ -s "${GROQ_CSV}" ]; then
+        printf '\n--- %s ---\n' "$(basename "${GROQ_CSV}")"
+        head -1 "${GROQ_CSV}"
+        tail -n +2 "${GROQ_CSV}" | tail -3
+    fi
     ;;
 *)
     echo "usage: monitor_run.sh start|stop|status <run-dir>" >&2

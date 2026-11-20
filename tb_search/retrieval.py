@@ -5,7 +5,7 @@ import re
 from contextlib import redirect_stdout
 
 from tb_search.prompts import RETRIEVAL_PROMPT
-from tb_search.screening import CONTEXT_HINT, is_context_error, retry_transient
+from tb_search.screening import failure_hint, retry_transient
 from tb_search.verdicts import parse_paper_list
 
 # A1 calls its retrieval tools as python inside <execute> blocks, so the
@@ -62,6 +62,11 @@ def _run_streamed(agent, prompt: str, verbose: bool) -> str:
     return answer
 
 
+def _attempts(agent) -> int | None:
+    """How many times this run waits out Groq's rate limit; build_agent set it."""
+    return getattr(agent, "max_retries", None)
+
+
 def retrieve_papers(
     agent, query: str, max_papers: int = 10, verbose: bool = False
 ) -> list[dict]:
@@ -73,11 +78,14 @@ def retrieve_papers(
     prompt = RETRIEVAL_PROMPT.replace("{N}", str(max_papers)).replace("{QUERY}", query)
 
     try:
-        answer = retry_transient(_run_streamed, agent, prompt, verbose)
+        answer = retry_transient(
+            _run_streamed, agent, prompt, verbose, attempts=_attempts(agent)
+        )
     except Exception as e:  # noqa: BLE001 - a dead agent run must not stop the CLI
         print(f"  ! agent run failed: {e}", flush=True)
-        if is_context_error(e):
-            print(CONTEXT_HINT, flush=True)
+        hint = failure_hint(e)
+        if hint:
+            print(hint, flush=True)
         answer = ""
 
     rows = parse_paper_list(answer or "")
@@ -90,6 +98,7 @@ def retrieve_papers(
                 agent,
                 prompt + "\n\nREMINDER: reply with ONLY the JSON list, no other text.",
                 verbose,
+                attempts=_attempts(agent),
             )
             rows = parse_paper_list(answer or "")
         except Exception as e:  # noqa: BLE001 - leave the run empty instead of crashing

@@ -2,8 +2,9 @@
 # One command, start to finish: submit the job, wait for it, show what it is
 # doing, and print where the results landed.
 #
-#   ./run.sh                    # the quick job: one drug, 8 isolates, ~2h cap
-#   ./run.sh full               # the full four-drug run on an A100
+#   ./run.sh                    # the quick job: one drug, 8 isolates, ~1h cap
+#   ./run.sh full               # the full four-drug run
+#   ./run.sh local              # don't submit anything; run it right here
 #
 # Then wait. It prints the queue position while the job is pending, follows
 # the log once it starts, and ends with the run's summary and the tarball to
@@ -15,10 +16,12 @@
 #
 #   DRUGS="rifampicin isoniazid" LIMIT=20 ./run.sh full
 #   QUICK_LIMIT=4 ./run.sh                      # smaller quick run
-#   SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run.sh
+#   MODEL=openai/gpt-oss-20b ./run.sh full
+#   SBATCH_ARGS="--partition=cpu-preempt" ./run.sh
 #
-# Off the cluster, with a server already up, it runs the pipeline here instead
-# of submitting anything.
+# Inference is Groq's, so the jobs these submit hold no model and ask for no
+# GPU — they are long-running clients, and the queue for CPUs is short. Off a
+# cluster there is nothing to submit to and the pipeline runs here.
 
 set -uo pipefail
 
@@ -31,7 +34,10 @@ ATTACH_JOB=""
 
 case "${MODE}" in
 quick) SCRIPT="scripts/run_unity_quick.sbatch"; PREFIX="tb-quick" ;;
-full)  SCRIPT="scripts/run_unity_a100.sbatch";  PREFIX="tb-a100"  ;;
+full)  SCRIPT="scripts/run_unity_cpu.sbatch";   PREFIX="tb-groq"  ;;
+# Nothing to submit: run the stages in this shell. The same thing happens
+# anyway where there is no sbatch.
+local) SCRIPT=""; PREFIX=""; export LOCAL=1 ;;
 # Re-attach to a job that is already in the queue, which is what Ctrl-C tells
 # you to run. Same waiting, following and summary as a fresh submit, minus the
 # submit; with no id, the newest job of yours.
@@ -40,7 +46,7 @@ full)  SCRIPT="scripts/run_unity_a100.sbatch";  PREFIX="tb-a100"  ;;
     [ -n "${ATTACH_JOB}" ] || { echo "No job to attach to." >&2; exit 1; }
     SCRIPT=""; PREFIX=""
     ;;
-*)     echo "usage: ./run.sh [quick|full|--attach [jobid]]" >&2; exit 2 ;;
+*)     echo "usage: ./run.sh [quick|full|local|--attach [jobid]]" >&2; exit 2 ;;
 esac
 
 mkdir -p logs results
@@ -59,12 +65,19 @@ command -v uv >/dev/null 2>&1 || {
     echo "On Unity: module load uv, or install it into your home." >&2
     fail=1
 }
+# The key is the one thing with no default, and a job that does not have it
+# dies on its first Groq call — twenty minutes of queue later. run_experiment.sh
+# reads .env itself, so either is enough.
+if [ -z "${GROQ_API_KEY:-}" ] && ! grep -qs '^[[:space:]]*GROQ_API_KEY[[:space:]]*=' .env; then
+    echo "No GROQ_API_KEY, in the environment or in .env." >&2
+    echo "  export GROQ_API_KEY=gsk_...   (keys: https://console.groq.com/keys)" >&2
+    fail=1
+fi
 [ "${fail}" -eq 0 ] || exit 1
 
-# --- no cluster: run it here ----------------------------------------------
-if ! command -v sbatch >/dev/null 2>&1; then
-    echo "No sbatch here, so running the pipeline locally against"
-    echo "${BASE_URL:-http://localhost:8000/v1} — the server has to be up already."
+# --- nothing to submit to: run it here ------------------------------------
+if [ "${MODE}" = "local" ] || ! command -v sbatch >/dev/null 2>&1; then
+    [ "${MODE}" = "local" ] || echo "No sbatch here, so running the pipeline in this shell."
     exec ./run_experiment.sh
 fi
 
@@ -72,7 +85,7 @@ fi
 if [ -n "${ATTACH_JOB}" ]; then
     JOB="${ATTACH_JOB}"
     LOG=""
-    for candidate in "logs/tb-quick-${JOB}.out" "logs/tb-a100-${JOB}.out"; do
+    for candidate in "logs/tb-quick-${JOB}.out" "logs/tb-groq-${JOB}.out"; do
         [ -f "${candidate}" ] && LOG="${candidate}" && break
     done
     # A job still pending has written no log yet; guess by the job's name so
@@ -96,9 +109,11 @@ JOB="$(sbatch --parsable ${SBATCH_ARGS:-} "${SCRIPT}" 2>"${SBATCH_ERR}")" || {
     echo "Submission failed: $(cat "${SBATCH_ERR}")" >&2
     rm -f "${SBATCH_ERR}"
     echo >&2
-    echo "If that says the node configuration is not available, nothing on the" >&2
-    echo "cluster matches the request. What exists right now:" >&2
-    sinfo -h -o '%20P %10l %8D %6t %30G %f' 2>/dev/null | head -20 >&2
+    echo "If that says the partition does not exist, name one that does — these" >&2
+    echo "jobs need CPUs only. What exists right now:" >&2
+    sinfo -h -o '%20P %10l %8D %6t' 2>/dev/null | head -20 >&2
+    echo >&2
+    echo '  SBATCH_ARGS="--partition=<partition>" ./run.sh '"${MODE}" >&2
     exit 1
 }
 # Show the notes, since they are worth reading, then reduce --parsable's

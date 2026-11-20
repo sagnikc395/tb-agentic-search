@@ -1,6 +1,6 @@
 #!/bin/bash
-# Watch a running job from a Unity login node: queue state, the card, and the
-# tail of the log, refreshed in place.
+# Watch a running job from a Unity login node: queue state, what the run has
+# cost at Groq so far, and the tail of the log, refreshed in place.
 #
 #   scripts/watch_job.sh              # the newest job of yours still running
 #   scripts/watch_job.sh 1234567      # a specific job id
@@ -27,7 +27,7 @@ if [ -z "${JOB}" ]; then
 fi
 
 LOG=""
-for candidate in "${REPO}/logs/tb-quick-${JOB}.out" "${REPO}/logs/tb-a100-${JOB}.out"; do
+for candidate in "${REPO}/logs/tb-quick-${JOB}.out" "${REPO}/logs/tb-groq-${JOB}.out"; do
     [ -f "${candidate}" ] && LOG="${candidate}" && break
 done
 
@@ -49,18 +49,9 @@ while :; do
 
     # The log only exists once the job starts, so find it late if we have to.
     if [ -z "${LOG}" ]; then
-        for candidate in "${REPO}/logs/tb-quick-${JOB}.out" "${REPO}/logs/tb-a100-${JOB}.out"; do
+        for candidate in "${REPO}/logs/tb-quick-${JOB}.out" "${REPO}/logs/tb-groq-${JOB}.out"; do
             [ -f "${candidate}" ] && LOG="${candidate}" && break
         done
-    fi
-
-    # Memory and utilisation on the card itself: the quick way to tell a server
-    # that is loading weights from one that is actually generating.
-    if [ "${STATE}" = "RUNNING" ] && [ -n "${NODE}" ]; then
-        printf '\n--- %s ---\n' "${NODE}"
-        timeout 10 srun --jobid="${JOB}" --overlap -n1 \
-            nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total \
-            --format=csv,noheader 2>/dev/null || echo "(gpu query unavailable)"
     fi
 
     # Results appear stage by stage, so this is the honest progress bar.
@@ -69,8 +60,8 @@ while :; do
         printf '\n--- %s ---\n' "${RUN_DIR#${REPO}/}"
 
         # Stages done and how long each took, plus the sampler's last few
-        # ticks: the card and the server as of seconds ago, without having to
-        # ssh to the node to ask.
+        # ticks: requests, tokens and rate-limit waits as of seconds ago. There
+        # is no card to ask about any more — the run's cost is the measurement.
         "${REPO}/scripts/monitor_run.sh" status "${RUN_DIR}" 2>/dev/null \
             | sed 's/^/  /'
 

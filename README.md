@@ -6,9 +6,9 @@
 ![relevance_check](./assets/paper_relevance_check.png)
 
 Three capabilities, each one a run of the
-[Biomni](https://github.com/snap-stanford/Biomni) A1 agent against a model you
-serve yourself — vLLM on the cluster, or Ollama locally (see
-[Serving the model](#serving-the-model-vllm-on-unity)). No hosted API, no key.
+[Biomni](https://github.com/snap-stanford/Biomni) A1 agent against a model on
+[Groq](https://console.groq.com/docs/overview)'s inference endpoint (see
+[Running on Groq](#running-on-groq)). No model to serve, no GPU — one key.
 
 - **Retrieval** (`--search`) — give it a request such as "find me relevant papers
   like this paper <paper-url>". A1 resolves the seed paper and searches for
@@ -25,34 +25,40 @@ serve yourself — vLLM on the cluster, or Ollama locally (see
   the phenotypic DST labels, and each trace is graded against the variants the
   model was actually shown.
 
-Serving the model ourselves is what makes the reasoning traces usable: a vLLM
-server started with a reasoning parser returns the model's thinking separated
-from its answer, and every prediction stores that trace verbatim beside the
-variants it was shown. It is also what gives A1 a tool-calling backend that
-costs GPU hours rather than per-token billing.
+Groq returns the model's thinking as its own field when asked to, which is what
+makes the reasoning traces usable: every prediction stores that trace verbatim
+beside the variants it was shown. And because inference is hosted, a run needs
+nothing from the cluster but wall time and a network route — what used to be an
+A100 reservation is now a CPU job, or your laptop.
 
 A1's system prompt is ~35k tokens and rides on every step of every run, so the
-server has to be started with a context window well past that
-(`--max-model-len 65536`) and with tool calling enabled. That is the one hard
-requirement this design buys: there is no small-call fallback path.
+model has to have a context window well past that and has to support tool
+calling. That is the one hard requirement this design buys: there is no
+small-call fallback path. The default `openai/gpt-oss-120b` has 131k of context
+and does its tool calling on Groq's side; what it costs is that those ~35k
+tokens are billed and counted against the per-minute limit on every step.
 
 ## Setup
 
 ```bash
 uv sync
-cp .env.example .env   # optional: everything in it has a default
+cp .env.example .env            # then put your key in it
+export GROQ_API_KEY=gsk_...     # or keep it in the environment instead
 ```
 
-Every mode but `--cohort` needs a model server to call, and nothing in `.env`
-is required to reach one: the defaults are `Qwen/Qwen3-32B-AWQ` at
-`http://localhost:8000/v1`, so `--base-url` (or `VLLM_BASE_URL`) is all that
-changes when the server lives on a compute node.
+Every mode but `--cohort` calls Groq, and the key is the one thing in `.env`
+with no default — keys are at
+[console.groq.com/keys](https://console.groq.com/keys). Everything else has
+one: the default model is `openai/gpt-oss-120b` at
+`https://api.groq.com/openai/v1`, so `--model` is usually the only provider
+flag worth passing.
 
 ## Running the whole experiment
 
 ```bash
-./run.sh            # the quick job: one drug, 8 isolates, 2h cap
-./run.sh full       # the full four-drug run on an A100
+./run.sh            # the quick job: one drug, 8 isolates, 1h cap
+./run.sh full       # the full four-drug run
+./run.sh local      # submit nothing; run the stages in this shell
 ```
 
 Then wait. `run.sh` submits the job, prints why it is still pending while it
@@ -60,14 +66,16 @@ is, follows the log once it starts, and ends by printing the run's summary and
 the folder and tarball to send on. Ctrl-C detaches without cancelling the job;
 `./run.sh --attach <jobid>` picks it back up, and `scancel <jobid>` is the way
 to actually stop it. It checks for `uv`, the job script and the resistance
-table before submitting, so the usual reasons a job dies ten minutes in show
-up on your terminal instead of at the bottom of a log.
+table before submitting — and for the key, because a job without one queues
+for twenty minutes and then dies on its first Groq call. The usual reasons a
+job dies show up on your terminal instead of at the bottom of a log.
 
 Everything below still works and `run.sh` passes it through:
 
 ```bash
 DRUGS="rifampicin isoniazid" LIMIT=20 ./run.sh full
 QUICK_LIMIT=4 ./run.sh
+MODEL=openai/gpt-oss-20b ./run.sh full
 ```
 
 `run_experiment.sh` is the layer underneath — the three stages themselves —
@@ -77,12 +85,14 @@ and can still be run directly:
 ./run_experiment.sh
 ```
 
-From a Unity login node that submits `scripts/run_unity_a100.sbatch`, which
-takes an A100, serves the model, and runs this same script against it. With a
-server already up it runs here instead. Three stages: the cohort join (no model
-involved, so it fails fast if the data is unreadable), resistance prediction
-per drug, and literature screening against the hand labels in `eval/`. A stage
-that fails is recorded and the rest still run.
+From a Unity login node that submits `scripts/run_unity_cpu.sbatch`, which runs
+this same script inside a batch job — CPUs only, because inference is Groq's.
+`LOCAL=1 ./run_experiment.sh` runs the stages on the login node itself, and off
+a cluster there is nothing to submit to so that is what happens anyway. Three
+stages: the cohort join (no model involved, so it fails fast if the data is
+unreadable), resistance prediction per drug, and literature screening against
+the hand labels in `eval/`. A stage that fails is recorded and the rest still
+run.
 
 Everything lands in `results/<run-id>/`, which is the folder to hand to someone
 else — raw JSON exactly as the pipeline wrote it, every stage's full log, the
@@ -96,23 +106,33 @@ scripts/collect_results.sh                    # the newest run
 scripts/collect_results.sh results/<run-id>   # a particular one
 ```
 
-Every run is also sampled while it runs. `scripts/monitor_run.sh` is started
-and stopped by `run_experiment.sh`, and writes two timelines into the run's
-`logs/`: `gpu_timeline.csv` (utilisation, memory, power, temperature) and
-`server_timeline.csv` (vLLM's requests running and queued, KV-cache occupancy
-and generation tokens per second). `logs/stages.jsonl` records each stage's
-exit code, start time and duration beside them. These answer the question the
-stage logs cannot — whether a slow run was slow because the card was saturated
-or because it sat idle waiting on the agent — and `SUMMARY.md` carries the
-headline figures under **Run monitoring**.
+Every run is also sampled while it runs — and with inference hosted, the only
+record of what a request cost is the response itself, so the pipeline keeps it.
+`tb_search/usage.py` files one line per request into
+`logs/groq_usage.jsonl` (tokens in and out, how much of the output was
+thinking, how long Groq queued it) and one line per second spent waiting out a
+rate limit. `scripts/monitor_run.sh`, started and stopped by
+`run_experiment.sh`, rolls that up per tick into `logs/groq_timeline.csv`, and
+`logs/stages.jsonl` records each stage's exit code, start time and duration
+beside them.
+
+These answer the question the stage logs cannot, which has changed shape along
+with the backend. It used to be *was the card saturated or idle?*; it is now
+*was the model thinking, or were we being throttled?* — completion and
+reasoning tokens up with queue time flat is the first, queue time and wait
+seconds up is the second, and the two call for opposite fixes (a lower
+`--reasoning-effort` against the first, fewer isolates in flight or a higher
+tier against the second). `SUMMARY.md` carries the headline figures under
+**Run monitoring** and says which reading its run looks like.
 
 `results/runs.csv` is one row per run across every run that has finished,
 successful or not: model, effort, seed, commit, which stages failed, total
-time, mean GPU utilisation and mean tokens per second. It is rewritten by
-run id, so re-running `collect_results.sh` on a folder corrects that run's row
-rather than adding another.
+time, requests made, tokens in and out, thinking tokens, mean queue time and
+seconds lost to rate limits. It is rewritten by run id, so re-running
+`collect_results.sh` on a folder corrects that run's row rather than adding
+another.
 
-To watch a Slurm job, including the live timelines and stage durations:
+To watch a Slurm job, including the live usage timeline and stage durations:
 
 ```bash
 scripts/watch_job.sh              # the newest job of yours in the queue
@@ -125,12 +145,16 @@ The knobs are environment variables, so the defaults stay out of the command:
 ```bash
 DRUGS="rifampicin isoniazid" LIMIT=40 EFFORT=high ./run_experiment.sh
 VCF_ROOT=/project/.../vcfs ./run_experiment.sh    # VCFs not where the cohort says
+MODEL=openai/gpt-oss-20b MAX_RETRIES=10 ./run_experiment.sh
 ```
 
 `DRUGS` (default: rifampicin, isoniazid, ethambutol, pyrazinamide), `LIMIT`
 isolates per drug, `BALANCE=1` for equal R and S, `SEED` so a run repeats,
-`EFFORT`, `RUN_ID` to name the folder, and `BASE_URL`/`MODEL` to point at a
-server yourself.
+`EFFORT`, `RUN_ID` to name the folder, `MODEL` for a different Groq model,
+`MAX_RETRIES` for how long to wait out a 429, `TOOLS=1` for a retrieved tool
+subset (see [the rate limit](#the-rate-limit-is-the-new-gpu) — it is what
+decides whether a low tier fits at all), and `LOCAL=1` to run here rather than
+submit.
 
 ## Resistance prediction from VCFs
 
@@ -194,128 +218,124 @@ problem) and ends with accuracy, sensitivity, specificity, PPV/NPV, the
 confusion matrix and the trace rates. `tb_resistance_<drug>.json` holds every
 prediction with its variant list, reasoning and trace grade.
 
-## Serving the model (vLLM on Unity)
+## Running on Groq
 
-The model runs on our own hardware, which is what puts the model choice, the
-reasoning settings and the response format under our control — and lets the
-server hand back the model's thinking as its own field instead of leaving it
-mixed into the answer.
+Inference is [Groq](https://console.groq.com/docs/overview)'s. There is no
+server to start, no weights to place and no card to reserve: the pipeline is an
+HTTP client with a key, and A1's tool calling happens against that same
+endpoint.
 
-Biomni has two backends that serve a model locally, and both drive the A1
-agent:
+```bash
+export GROQ_API_KEY=gsk_...
+uv run cli.py --predict rifampicin --limit 40 --balance --reasoning-effort high
+```
 
-| `--source` | what it is | reasoning traces |
+Biomni calls this its `Groq` source, and it is the only backend this repo
+offers. The hosted and local ones biomni also knows (OpenAI, Anthropic, Gemini,
+Bedrock, Azure, Ollama, Custom) are deliberately refused in
+`config._resolve_source`, so a leftover `LLM_SOURCE` from the vLLM days is
+reported and ignored rather than quietly changing what answered.
+
+### The model
+
+The default is `openai/gpt-oss-120b`, because it is the one Groq model that does
+everything this pipeline needs at once:
+
+| requirement | why | `openai/gpt-oss-120b` |
 | --- | --- | --- |
-| `Custom` (default) | any OpenAI-compatible server, i.e. `vllm serve` | separated into `reasoning`, captured per prediction |
-| `Ollama` | a pulled Ollama model on its own port | only what the model leaves in `<think>` tags |
+| tool calling | A1 calls its tools as code; without it there is no agent | yes |
+| context ≫ 35k | A1's system prompt rides on every step | 131,072 tokens |
+| separated reasoning | the traces are the point of the run | in the `reasoning` field |
+| an effort scale | traces only compare across runs at equal effort | `low`/`medium`/`high` |
 
-`Custom` is the one to use on the cluster. The default model is
-`Qwen/Qwen3-32B-AWQ`: vLLM serves it with a `qwen3` reasoning parser *and* with
-tool calling, and biomni reaches it as an ordinary OpenAI-compatible model,
-which is what A1 needs to call its tools — all three at once, which not every
-model manages.
+`--model openai/gpt-oss-20b` is the same four properties on a smaller model and
+is what `scripts/run_unity_quick.sbatch` uses; `--model qwen/qwen3.8-27b` also
+reasons, with `none`/`default` as its effort values instead. Groq's catalogue
+moves — ids get added, promoted out of preview and retired — so
+`check_connection` lists the models the account can actually reach and refuses
+an id that is not among them, by name, before the run starts.
 
-`scripts/run_unity_a100.sbatch` is the whole cluster side: one Slurm job that
-takes an A100, serves the model, waits for it to come up, and then runs the
-pipeline against it. Everything after the script name goes to `cli.py`:
+### Asking for the thinking
 
-```bash
-sbatch scripts/run_unity_a100.sbatch --predict rifampicin --limit 40 --balance
-sbatch scripts/run_unity_a100.sbatch --search "fluoroquinolone resistance"
-sbatch scripts/run_unity_a100.sbatch        # no args: serve only, and hold
-tail -f logs/tb-a100-<jobid>.out            # prints the --base-url to use
+Two request fields do this on Groq and they are mutually exclusive, so
+`reasoning.reasoning_body` picks by model family:
+
+| model | field sent | why |
+| --- | --- | --- |
+| `openai/gpt-oss-*` | `include_reasoning: true` | these reject `reasoning_format` outright and return `reasoning` by default |
+| everything else | `reasoning_format: "parsed"` | `parsed` splits the thinking into its own field |
+
+`raw` is never sent: it leaves the thinking inline in `<think>` tags *and* is a
+400 as soon as tool calling or JSON mode is on, which for an A1 run is always.
+`--reasoning-effort` rides along in the same body. It is recorded in the output
+JSON, because traces are only comparable across runs at the same effort, and
+which values a model accepts is the model's business — Groq answers an effort
+the model does not know with a 400 rather than a silent default, which
+`check_connection` surfaces before the sweep rather than during it.
+
+### The rate limit is the new GPU
+
+What could go wrong has moved. A server we served ourselves could be down, be
+serving a different model id, or run out of context window; a hosted endpoint
+is up, and what it does instead is refuse you for being over your share —
+requests and tokens per minute, and per day.
+
+So `retry_transient` is where the care went. A 429 carries `retry-after`, and
+the body repeats it to the millisecond ("Please try again in 7.481s"); whichever
+is there is obeyed, plus a second of slack so the window has actually rolled
+over by the time the retry lands. With no instruction the wait doubles from 5s
+per attempt, with jitter, capped at 90s. `--max-retries` (default 5) is how many
+times one request waits before its batch or isolate is given up on — and giving
+up is per batch and per isolate, so a sweep survives one item it could not get
+through.
+
+What is *not* retried matters as much: a prompt past the context window, a bad
+key, a model this account cannot reach and an effort the model does not accept
+all fail again identically, so they are raised at once. `is_context_error` is
+careful here, because a rate-limit message names a limit in tokens and must not
+read as a context-length failure.
+
+**The one that will catch you first.** A single A1 request is almost entirely
+its own system prompt, and Groq refuses a request bigger than the account's
+whole per-minute budget with a 413 that reads like a rate limit:
+
+```
+Error code: 413 - Request too large for model `openai/gpt-oss-120b` ...
+on tokens per minute (TPM): Limit 8000, Requested 36071
 ```
 
-With no arguments it holds the server for the rest of the walltime, which is
-the mode to use when the client is somewhere else — a tunnel from a laptop, or
-an interactive session. With arguments it kills the server as soon as the run
-finishes, so the card is not held for nothing.
+Waiting cannot fix that — the request does not fit in a whole minute's
+allowance — so `is_token_budget_error` holds it apart from both the retried
+errors and the context-window ones, and the hint says what actually moves the
+number. Measured on this repo, screening one document:
 
-The model is quantized because of the card. Unity's `a100` nodes are compute
-capability 8.0, which has no native FP8, so 4-bit AWQ is the quantization that
-runs there: `Qwen/Qwen3-32B-AWQ` is ~18 GB of weights, leaving the rest of a
-40 GB card (and most of an 80 GB one) to the KV cache at the 64k context A1
-needs — one GPU is enough for every mode. vLLM reads the AWQ config out of the
-checkpoint and picks the `awq_marlin` kernel itself, so there is no
-`--quantization` flag to pass. `MODEL=Qwen/Qwen3-8B` serves the bf16 8B on the
-same job instead; same family, so the parsers are unchanged and only the served
-id passed to the client changes.
+| | tokens per request |
+| --- | ---: |
+| the whole tool catalogue in the system prompt | ~36,100 |
+| `--tools` — A1 retrieves a tool subset instead | ~10,700 |
+| Groq free tier's limit | 8,000 |
 
-The job asks for `--partition=gpu-highvram --gres=gpu:a100:1`. Both halves
-matter: Unity's default partition is `cpu`, which refuses a `--gres` at all, and
-its plain `gpu` partition holds titan_x/v100/1080_ti/2080_ti/m40/l4/a16 but no
-A100 — so `--partition=gpu --constraint=a100` is unsatisfiable. `sinfo -o '%P %G
-%f' | grep a100` is the list that settles which partitions have them:
-`gpu-highvram` (non-preemptible, the default here), `gpu-preempt-highvram`,
-`superpod-a100`, and the PI partitions `cbio-gpu`, `ece-gpu`, `umd-cscdr-gpu`.
-To aim the job elsewhere, pass `SBATCH_ARGS` instead of editing the file; it
-overrides the job's own directives:
+So `--tools` is the one real lever, and `--batch-size`/`--max-chars` are not:
+the documents are a rounding error next to the catalogue. Past `--tools` the
+tier has to go up; an A1 run does not fit in a free-tier minute at all. This is
+the GPU-hours cost of the old design reappearing as a token budget, and it is
+the reason `BIOMNI_USE_TOOL_RETRIEVER` is worth setting in `.env` rather than
+remembering the flag.
 
-```bash
-SBATCH_ARGS="--partition=gpu-preempt-highvram" ./run_experiment.sh
-SBATCH_ARGS="--constraint=a100-80g" ./run_experiment.sh   # 80 GB cards only
-```
+Every second spent waiting is recorded (`logs/groq_usage.jsonl`), which is what
+lets `SUMMARY.md` tell a run that was slow because the model was thinking from
+one that was slow because the account was throttled.
 
-A failed submission prints the GPU nodes the cluster actually offers, which is
-the list to choose from. Walltime and the venv holding vLLM are set at the top
-of the job file. It runs, in effect:
+### What ends up in the traces
 
-```bash
-vllm serve Qwen/Qwen3-32B-AWQ --port 8000 \
-    --gpu-memory-utilization 0.90 \
-    --reasoning-parser qwen3 \
-    --enable-auto-tool-choice --tool-call-parser hermes \
-    --max-model-len 65536
-```
+Each prediction carries two: `reasoning`, what the model wrote into its answer,
+and `reasoning_trace`, the thinking Groq returned separately. They can disagree,
+and the second is the one that shows how the call was actually reached, so it is
+what the biological-validity read-through works from. The run summary reports how
+many calls came with thinking attached and the median length; a model that
+returns none yields empty traces and the summary says so.
 
-`--reasoning-parser` is what separates the thinking into the response's
-`reasoning` field ([vLLM
-docs](https://docs.vllm.ai/en/stable/features/reasoning_outputs/)); the parser
-name has to match the model family. `--enable-auto-tool-choice` is what lets
-the A1 agent do its tool calling against this server, and `--max-model-len` has
-to clear A1's ~35k-token system prompt for anything to work at all.
-
-Then point any mode at it. biomni runs here, in this process, and knows the
-inference engine only by URL:
-
-```bash
-# resistance prediction, with thinking captured per isolate
-uv run cli.py --predict rifampicin --limit 40 --balance \
-    --base-url http://gpu042:8000/v1 --model Qwen/Qwen3-32B-AWQ \
-    --reasoning-effort high
-
-# from a laptop, through a tunnel: ssh -N -L 8000:gpu042:8000 unity.rc.umass.edu
-uv run cli.py --predict isoniazid --base-url http://localhost:8000/v1 ...
-
-# a retrieval run against the same server
-uv run cli.py --search "papers like <url>" --base-url http://gpu042:8000/v1
-```
-
-`--base-url` is biomni's `Custom` source, which A1 takes too, so the agent's
-own tool calling runs against that same server; no API key is involved.
-Before anything else runs,
-the endpoint is pinged and its model list checked, so a job that has not come up
-yet — or a model id that is not the one being served — fails immediately
-instead of mid-run (`--source Ollama` is checked the same way, against
-`ollama`'s own list of pulled models).
-
-A local server has no rate limit, so there is nothing to wait out; a request
-that fails on a busy or restarting server is retried twice, while one that fails
-on context length is not, because it would fail again identically.
-
-`--reasoning-effort` goes out as the request's `reasoning_effort`, which vLLM
-maps onto the chat template's thinking switch. It is recorded in the output
-JSON, because traces are only comparable across runs at the same effort.
-
-**What ends up in the traces.** Each prediction carries two: `reasoning`, what
-the model wrote into its answer, and `reasoning_trace`, the thinking the server
-separated out. They can disagree, and the second is the one that shows how the
-call was actually reached, so it is what the biological-validity read-through
-works from. The run summary reports how many calls came with thinking attached
-and the median length; a model served without a reasoning parser yields empty
-traces and the summary says so.
-
-With `reasoning_content` being the field's older spelling, and langchain's
+With `reasoning_content` as the field's other spelling, and langchain's
 `ChatOpenAI` dropping both as non-standard, `tb_search/screening.py` subclasses
 it to keep them — otherwise the traces never reach us at all.
 
@@ -325,7 +345,33 @@ every reply as a fresh `AIMessage`, so `additional_kwargs` — and the
 graph state. So the subclass also appends each trace to a list that
 `build_agent` hands it, and `run_agent` reads that list back per run: the whole
 run's thinking, step by step, which with a tool loop in the middle is what the
-answer was actually reasoned from.
+answer was actually reasoned from. The same subclass is where every response's
+`usage` block is filed, since that is the only place a hosted run's cost is
+visible.
+
+### On the cluster
+
+Nothing needs a GPU any more, but a four-drug sweep is still hours of wall time
+and a login node is still the wrong place to spend them, so
+`scripts/run_unity_cpu.sbatch` is a batch job that asks for CPUs and runs the
+pipeline as a client:
+
+```bash
+export GROQ_API_KEY=gsk_...      # sbatch exports your environment to the job
+sbatch scripts/run_unity_cpu.sbatch experiment
+sbatch scripts/run_unity_cpu.sbatch --predict rifampicin --limit 40 --balance
+sbatch scripts/run_unity_cpu.sbatch --search "fluoroquinolone resistance"
+tail -f logs/tb-groq-<jobid>.out
+```
+
+`--partition=cpu` is Unity's default partition, so this queues in minutes.
+`--time=08:00:00` is what a four-drug run at `--limit 20` fits inside with room
+for the rate limit; `sbatch --time=24:00:00 ...` for a longer sweep, and
+`SBATCH_ARGS` passes through from `run.sh` and `run_experiment.sh` for anything
+else. Everything the old A100 job had to get right — a card with the capability
+for the kernel, a quantization that fits it, a context window past A1's system
+prompt, waiting out the weight load — is the provider's problem now. What is
+left is the key reaching the job and the account's limits.
 
 ## Usage
 
@@ -357,7 +403,7 @@ A retrieval run echoes the agent's searches as it makes them (the step number in
 brackets), then the papers it settled on:
 
 ```
-Searching for up to 10 paper(s) [A1 agent, Custom Qwen/Qwen3-32B-AWQ @ http://gpu042:8000/v1]
+Searching for up to 10 paper(s) [A1 agent, Groq openai/gpt-oss-120b effort high]
   query: find me relevant papers like this paper https://...
 
   [2] extract_url_content(https://www.biorxiv.org/content/...)
@@ -377,12 +423,11 @@ nothing here can *prove* a row came from a real record. Spot-check the links.
 
 ## Architecture
 
-Two processes and an HTTP boundary. The pipeline runs wherever you launched it
-— a login node, or a laptop through an SSH tunnel — and knows the model only as
-a URL; the model runs in its own Slurm job on a GPU node. Nothing in the
-pipeline holds weights, and nothing in the server holds pipeline state, so the
-server can be restarted, resized or swapped for a different model id without
-touching the code.
+One process and an HTTP boundary. The pipeline runs wherever you launched it —
+a laptop, a login node, a batch job — and knows the model only as a Groq model
+id; the weights are Groq's problem. Nothing here holds state the endpoint needs,
+so the model id can be swapped without touching the code, and the same command
+runs identically on a laptop and in a job.
 
 ```mermaid
 flowchart TB
@@ -400,10 +445,10 @@ flowchart TB
         VCF["data/cleaned_vcf_paths/<br/>BIG-TB VCFs (--vcf-root)"]
     end
 
-    subgraph client["client process — login node, or a laptop over an SSH tunnel"]
+    subgraph client["client process — a laptop, a login node, or a CPU batch job"]
         CLI["<b>cli.py</b><br/>flags + .env"]
-        CFG["config.load_settings<br/>→ Settings; a hosted source<br/>is refused here, not later"]
-        CHK["screening.check_connection<br/>the server answers, with this model"]
+        CFG["config.load_settings<br/>→ Settings; a missing key or a<br/>non-Groq source is refused here, not later"]
+        CHK["screening.check_connection<br/>Groq answers, and offers this model"]
 
         SCREEN["<b>screening</b> (default)<br/>documents → excerpts → verdicts"]
         SEARCH["<b>--search</b><br/>retrieval request → paper rows"]
@@ -414,8 +459,8 @@ flowchart TB
         REPORT["evaluate.py + report.py<br/>scores, console summary, JSON"]
     end
 
-    subgraph server["inference server — its own Slurm job on a GPU node"]
-        VLLM["vllm serve Qwen/Qwen3-32B-AWQ<br/>--reasoning-parser qwen3<br/>--enable-auto-tool-choice<br/>--max-model-len 65536"]
+    subgraph server["Groq — api.groq.com, hosted"]
+        GROQ["openai/gpt-oss-120b<br/>tool calling · 131k context<br/>include_reasoning: true<br/>reasoning_effort: high"]
     end
 
     CLI --> CFG --> CHK
@@ -426,14 +471,14 @@ flowchart TB
     SCREEN --> MODEL
     SEARCH --> MODEL
     PREDICT --> MODEL
-    MODEL <-->|"HTTP — POST /v1/chat/completions"| VLLM
+    MODEL <-->|"HTTPS — POST /openai/v1/chat/completions"| GROQ
     SCREEN --> REPORT
     SEARCH --> REPORT
     COHORT --> REPORT
     PREDICT --> REPORT
 
     classDef boundary stroke-width:3px
-    class MODEL,VLLM boundary
+    class MODEL,GROQ boundary
 ```
 
 The layering is deliberate in three places:
@@ -461,8 +506,8 @@ cli.py run_screening
   load_settings            config.py      .env -> Settings
   resolve_input            documents.py   the directory or single file to read
   collect_docs             documents.py   every PDF/text under it
-  check_connection         screening.py   the server's model list + a 1-token call, so a server that is down fails here
-  build_agent              screening.py   biomni.agent.A1, wired to our server
+  check_connection         screening.py   Groq's model list + a 1-token call, so a bad key or model id fails here
+  build_agent              screening.py   biomni.agent.A1, wired to Groq
   classify_documents_agent screening.py   one agent run per --batch-size documents
     section_excerpt        documents.py   opening + methods + conclusion
     BATCH_SCREEN_PROMPT    prompts.py     the listing -> one JSON list
@@ -499,8 +544,8 @@ is salvaged, normalized and checked before it becomes a row.
 flowchart TB
     subgraph setup["once, before the first call"]
         L1["config.load_settings<br/>.env + flags → Settings"]
-        L2["screening.check_connection<br/>the model list, then a 1-token call:<br/>a server that is down, or serving a<br/>different id, fails here"]
-        L3["screening._prime_environment<br/>BIOMNI_CUSTOM_BASE_URL / _API_KEY,<br/>where biomni's own code looks"]
+        L2["screening.check_connection<br/>the model list, then a 1-token call:<br/>a dead key, an id this account cannot<br/>reach, or an effort the model<br/>rejects, all fail here"]
+        L3["screening._prime_environment<br/>GROQ_API_KEY, where biomni's<br/>own Groq branch looks"]
         L4["build_agent<br/>one A1 agent for the whole run;<br/>agent.reasoning_traces attached"]
         L1 --> L2 --> L3 --> L4
     end
@@ -508,15 +553,15 @@ flowchart TB
     subgraph percall["per document, per candidate paper, per isolate"]
         P1["task prompt built — prompts.py<br/>a batch of section excerpts, a numbered<br/>variant listing, or the retrieval request"]
         P2["screening.run_agent<br/>agent.go — A1's tool loop, its ~35k-token<br/>system prompt on every step"]
-        P3["screening.retry_transient<br/>POST /v1/chat/completions, per step"]
-        P4["vLLM<br/>prefill → decode; the reasoning parser<br/>splits the thinking out of the answer"]
-        P5["(answer, trace) — langchain drops that<br/>field as non-standard and A1 rebuilds the<br/>message, so the ChatOpenAI subclass files<br/>each trace in agent.reasoning_traces;<br/>on Ollama it comes out of the think tags"]
+        P3["screening.retry_transient<br/>POST /openai/v1/chat/completions, per step"]
+        P4["Groq<br/>answers with the thinking in its own<br/>reasoning field, plus a usage block"]
+        P5["(answer, trace) — langchain drops that<br/>field as non-standard and A1 rebuilds the<br/>message, so the ChatOpenAI subclass files<br/>each trace in agent.reasoning_traces<br/>and each usage block in groq_usage.jsonl"]
         P6["verdicts.parse_verdict_list<br/>or resistance.parse_prediction<br/>the JSON, out of prose, fences or solution tags"]
         P7["verdicts.quote_in_text — screening<br/>the evidence quote checked against the excerpt<br/><br/>normalize_prediction — resistance.py<br/>the call folded to one of three"]
         P8["resistance.check_trace<br/>variants_resolve, genes_on_panel,<br/>call_grounded, tier1_support"]
         P9["one row, always"]
         P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8 --> P9
-        RETRY["a busy or restarting server:<br/>retried twice. a context-length<br/>failure: not retried, it would repeat —<br/>cut --batch-size or raise --max-model-len"]
+        RETRY["429 or a 5xx: waited out --max-retries<br/>times, obeying Groq's own retry-after.<br/>a context-length failure, a bad key or a<br/>rejected effort: not retried, it would<br/>repeat — cut --batch-size, or fix the flag"]
         P3 -.-> RETRY -.-> P3
         P6 -.->|"unreadable VCF, failed call,<br/>unparseable reply → a row<br/>carrying an error, so one bad<br/>input cannot end a sweep"| P9
     end
@@ -553,22 +598,43 @@ The touchpoints are few:
 | --- | --- | --- |
 | `biomni.agent.A1` | `screening.build_agent` | the one model object: tool loop, tool retriever, data-lake switch |
 | `biomni.config.default_config` | `screening.build_agent` | temperature, model and provider; A1 forwards `llm`/`source` but not `temperature` |
+| biomni's `Groq` source | `config.GROQ_SOURCE` | the branch that points langchain at api.groq.com with the key from the environment |
 | `agent.go(prompt)` | `screening.run_agent` | every task: screening batches, and one resistance prediction per isolate |
 | `agent.go_stream(prompt)` | `retrieval._run_streamed` | search step by step, so its tool calls can be echoed |
 | A1's retrieval tools | the `--search` run | `query_pubmed`, `query_arxiv`, `query_scholar`, `search_google`, `extract_url_content`, called as code inside `<execute>` |
+| `agent.configure()` | `screening.build_agent` | rebuild the graph after the model swap, so the swap holds whenever biomni reads `self.llm` |
 
-Six details are easy to get wrong, which is why the code spells them out:
+**Every model call is an A1 run.** The three modes reach the model only through
+`run_agent` (`agent.go`) or `retrieval._run_streamed` (`agent.go_stream`), and
+the agent's own tool retriever is handed that same model object, so one swapped
+`agent.llm` is the whole surface. The single exception is deliberate:
+`check_connection` makes one direct `max_tokens=1` call as a preflight, because
+a dead key should fail in two seconds with a readable reason rather than inside
+a tool loop behind ~36k tokens of system prompt. A test asserts no task path
+grows a second one.
+
+Seven details are easy to get wrong, which is why the code spells them out:
 
 - The source is always passed explicitly. Biomni's auto-detection sees the
-  slash in a HuggingFace id like `Qwen/Qwen3-32B-AWQ` and would route it to Ollama
-  on its own. `Custom` is the branch that points langchain at our server; A1
-  takes `base_url` too, so the agent's tool calling runs against it.
-- The endpoint is copied into the environment (`BIOMNI_CUSTOM_BASE_URL`,
-  `BIOMNI_CUSTOM_API_KEY`) before `A1` is built, because Biomni reads it from
-  there, not from our `Settings`.
-- A1 builds its own chat model, so `build_agent` replaces `agent.llm` with the
-  reasoning-keeping one afterwards; it stays a `ChatOpenAI` subclass because A1
-  calls `with_structured_output` on it.
+  slash in a model id like `openai/gpt-oss-120b` and would route it to Ollama on
+  its own. `Groq` is the branch that points langchain at api.groq.com, which is
+  where the agent's tool calling then runs.
+- The key is copied into the environment (`GROQ_API_KEY`) before `A1` is built,
+  because Biomni's Groq branch reads it from there rather than taking it as an
+  argument — so a key that came from our own `.env` handling has to be put back.
+- A1 builds its own chat model, which asks for no reasoning and would drop it
+  anyway, so `build_agent` replaces `agent.llm` with the reasoning-keeping one
+  afterwards; it stays a `ChatOpenAI` subclass because A1 calls
+  `with_structured_output` on it, and because Groq's endpoint is
+  OpenAI-compatible that is simply the right client for it.
+- `agent.configure()` is then called again, which is what A1 itself does after
+  its tools change. Its `generate` node reads `self.llm` when it runs, so the
+  swap already applies — but that is an assumption about biomni's internals
+  whose failure would be silent: the run would work, against biomni's own chat
+  model, and every reasoning trace and usage row would quietly come back empty.
+  Rebuilding the graph costs a prompt rebuild and makes the swap hold either
+  way. Verified on the live agent: the compiled graph invokes the swapped model
+  with A1's 156k-character system prompt, and the trace comes back per run.
 - `expected_data_lake_files=[]` (not `None`) is what tells A1 to skip its
   tens-of-GB data-lake download; `--data-lake` turns it back on.
 - `timeout_seconds` comes from `BIOMNI_TIMEOUT_SECONDS` (default 600) and is
@@ -580,9 +646,11 @@ Six details are easy to get wrong, which is why the code spells them out:
   isolate's thinking is not filed under the next.
 
 That system prompt rides on every step of every run, so the per-item cost is
-real: a sweep over thousands of isolates pays it thousands of times, and
-`--tools` (a retrieved tool subset) is the lever on it. Where a run can still
-fail, `retry_transient` retries a busy or restarting server twice, and a failure
+real and now metered: a sweep over thousands of isolates pays ~35k input tokens
+thousands of times, against an account limit measured per minute. `--tools` (a
+retrieved tool subset) is the lever on it, and `logs/groq_usage.jsonl` is where
+the bill for not pulling it shows up. Where a run can still fail,
+`retry_transient` waits out a 429 or a 5xx `--max-retries` times, and a failure
 is reported per batch or per isolate instead of ending the run.
 
 ## Flags
@@ -603,10 +671,11 @@ is reported per batch or per isolate instead of ending the run.
 | `--min-af` | `[--predict]` Drop variants below this alternate-allele frequency (default 0, keep all) |
 | `--keep-filtered` | `[--predict]` Also use variants the caller did not mark PASS |
 | `-o, --output` | JSON results path (default `tb_verdicts.json`, or `tb_papers.json` with `--search`) |
-| `--model` | Model id to request: on vLLM the id the server was started with, on Ollama the pulled tag (default: `$VLLM_MODEL` or `Qwen/Qwen3-32B-AWQ`) |
-| `--base-url URL` | Where the model is served, e.g. `http://gpu042:8000/v1` (default: `$VLLM_BASE_URL` or `http://localhost:8000/v1`). A1 does its tool calling against it too |
-| `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (default: `$LLM_REASONING_EFFORT`, else the server's own default) |
-| `--source` | Which biomni backend serves the model: `Custom` (any OpenAI-compatible server, i.e. vLLM) or `Ollama` (default: `$LLM_SOURCE` or `Custom`). Both drive A1; only `Custom` hands back separated traces |
+| `--model` | Groq model id to request (default: `$GROQ_MODEL` or `openai/gpt-oss-120b`). It has to support tool calling, and its context window has to clear A1's ~35k-token system prompt |
+| `--base-url URL` | Groq's OpenAI-compatible endpoint (default: `$GROQ_BASE_URL` or `https://api.groq.com/openai/v1`). Only worth passing to reach Groq through a proxy |
+| `--reasoning-effort LEVEL` | Reasoning effort sent with every request: `none`, `default`, `low`, `medium`, `high`, `xhigh`. Which are accepted depends on the model — `low`/`medium`/`high` for GPT-OSS, `none`/`default` for Qwen (default: `$LLM_REASONING_EFFORT`, else Groq's default for the model) |
+| `--max-retries N` | How many times a rate-limited or briefly failing request waits and tries again (default: `$GROQ_MAX_RETRIES` or 5). Groq's 429 says how long to wait and that is obeyed |
+| `--source` | Which biomni backend answers (default: `$LLM_SOURCE` or `Groq`). Only `Groq` is offered: this pipeline does not serve its own model |
 | `--batch-size` | `[screening]` Documents per agent run (default 2) |
 | `--max-chars` | Excerpt length per document (default 3000) |
 | `--tools` | Let A1 retrieve a relevant tool subset instead of carrying them all |
@@ -621,16 +690,17 @@ run.sh             submit, wait, follow, summarise — the one to run
 run_experiment.sh  the three stages themselves; writes results/<run-id>/
 cli.py             CLI entry point
 scripts/
-  run_unity_a100.sbatch     one Slurm job: serve the quantized model on a Unity
-                            A100, then run the pipeline against it
-  run_unity_quick.sbatch    the same experiment on any Ampere-or-newer card
-                            with >=23 GB, sized to clear the queue faster
+  run_unity_cpu.sbatch      one Slurm job, CPUs only: run the pipeline as a
+                            client against Groq
+  run_unity_quick.sbatch    the same experiment cut down — one drug, a smaller
+                            model, an hour of walltime
   collect_results.sh        SUMMARY.md, metrics.csv and a tarball for a run folder
-  monitor_run.sh            samples the GPU and the vLLM server during a run
-  watch_job.sh              queue state, stage progress and timelines, refreshed
+  monitor_run.sh            rolls up what each Groq request cost, during a run
+  watch_job.sh              queue state, stage progress and usage, refreshed
 tb_search/
-  config.py        Settings loaded from .env / environment: which local backend, which model
-  reasoning.py     reasoning effort, and pulling a reply's thinking out of it
+  config.py        Settings loaded from .env / environment: key, model, effort, retries
+  reasoning.py     asking Groq to separate the thinking, and reading it back out
+  usage.py         what every request cost: tokens, queue time, rate-limit waits
   documents.py     collect files, extract text and section-aware excerpts
   prompts.py       the task prompts handed to A1: screening, retrieval, resistance
   verdicts.py      salvage JSON out of whatever the model returned; check a quote against its text

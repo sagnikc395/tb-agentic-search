@@ -164,7 +164,7 @@ def write_predictions(
     else:
         print(
             "  thinking: none captured — the traces are only what the model wrote "
-            "into its answer. Serve the model with a vLLM reasoning parser "
-            "(--reasoning-parser) to record its thinking too."
+            "into its answer. Use a Groq reasoning model (the default) with a "
+            "--reasoning-effort it accepts to record its thinking too."
         )
     print(f"\nSaved to {output}")

@@ -1,17 +1,17 @@
 """Screen research documents and predict TB drug resistance with the Biomni A1 agent.
 
-Every LLM mode is one A1 run. The agent runs in this process and talks to a
-model you serve yourself: a vLLM job holding it, reached over HTTP. Start the
-server with a reasoning parser and --reasoning-effort is honoured and the
-model's thinking is recorded next to each prediction. Tool calling has to be on,
-because A1 calls its tools as code, and the context window has to clear A1's
-~35k-token system prompt:
+Every LLM mode is one A1 run. The agent runs in this process and talks to Groq's
+hosted endpoint, so there is no server to start and no GPU involved — only a key
+in the environment:
 
-    vllm serve Qwen/Qwen3-32B-AWQ --reasoning-parser qwen3 \
-        --enable-auto-tool-choice --tool-call-parser hermes \
-        --max-model-len 65536 --port 8000
-    tb-search --predict rifampicin --base-url http://$NODE:8000/v1 \
-        --model Qwen/Qwen3-32B-AWQ --reasoning-effort high
+    export GROQ_API_KEY=gsk_...
+    tb-search --predict rifampicin --model openai/gpt-oss-120b \
+        --reasoning-effort high
+
+The model has to do two things for any of this to work: call tools, because A1
+calls its tools as code, and carry A1's ~35k-token system prompt on every step,
+which the default openai/gpt-oss-120b has 131k of context for. Its thinking
+comes back in its own field and is recorded next to each prediction.
 
 The default mode screens a directory of documents, handing the agent
 --batch-size of them per run. --search runs a retrieval request instead — often
@@ -33,10 +33,10 @@ from pathlib import Path
 from tb_search.catalogue import drug_key, known_drugs, panel_for
 from tb_search.cohort import DATA_DIR, CohortError, load_cohort
 from tb_search.config import (
-    DEFAULT_BASE_URL,
+    DEFAULT_MAX_RETRIES,
     DEFAULT_MODEL,
     DEFAULT_SOURCE,
-    LOCAL_SOURCES,
+    SOURCES,
     ConfigError,
     load_settings,
 )
@@ -66,6 +66,7 @@ def provider_options(args) -> dict:
         "base_url": args.base_url,
         "reasoning_effort": args.reasoning_effort,
         "source": args.source,
+        "max_retries": args.max_retries,
         "use_tool_retriever": args.tools or None,
         "load_data_lake": args.data_lake or None,
     }
@@ -78,9 +79,9 @@ def fail(message: str) -> int:
 
 
 def connected_agent(args):
-    """Settings checked, server pinged, agent built — the one model path.
+    """Settings checked, Groq pinged, agent built — the one model path.
 
-    Raises ConfigError, so a server that is down or serving a different model
+    Raises ConfigError, so a missing key or a model this account cannot reach
     fails here rather than part-way through a sweep.
     """
     settings = load_settings(**provider_options(args))
@@ -92,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tb-search",
         description="Screen TB literature and predict drug resistance from VCFs "
-        "with the Biomni A1 agent, on a model served locally with vLLM or Ollama.",
+        "with the Biomni A1 agent, running on Groq's inference endpoint.",
     )
     parser.add_argument(
         "input",
@@ -187,34 +188,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        help="Model id to request: on vLLM the id the server was started with, "
-        "on Ollama the pulled tag "
-        f"(default: $VLLM_MODEL or {DEFAULT_MODEL}).",
+        help="Groq model id to request, e.g. openai/gpt-oss-20b or "
+        f"qwen/qwen3.8-27b (default: $GROQ_MODEL or {DEFAULT_MODEL}). It has to "
+        "support tool calling, and its context window has to clear A1's "
+        "~35k-token system prompt.",
     )
     parser.add_argument(
         "--base-url",
         metavar="URL",
-        help="Where the model is served — the vLLM job's URL, e.g. "
-        f"http://gpu042:8000/v1 (default: $VLLM_BASE_URL or {DEFAULT_BASE_URL}). "
-        "This is biomni's Custom source, which A1 takes too, so the agent does "
-        "its tool calling against that same server.",
+        help="Groq's OpenAI-compatible endpoint (default: $GROQ_BASE_URL or "
+        "https://api.groq.com/openai/v1). Only worth passing to reach Groq "
+        "through a proxy.",
     )
     parser.add_argument(
         "--reasoning-effort",
         metavar="LEVEL",
         choices=EFFORTS,
         help="Reasoning effort sent with every request: "
-        f"{', '.join(EFFORTS)}. vLLM maps it onto the chat template's thinking "
-        "switch, so it sets how much reasoning the captured traces are made of "
-        "(default: $LLM_REASONING_EFFORT, else the server's own default).",
+        f"{', '.join(EFFORTS)}. It sets how much reasoning the captured traces "
+        "are made of, and which values are accepted depends on the model — "
+        "low/medium/high for the GPT-OSS models, none/default for Qwen "
+        "(default: $LLM_REASONING_EFFORT, else Groq's default for the model).",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        metavar="N",
+        help="How many times a rate-limited or briefly failing request waits and "
+        f"tries again (default: $GROQ_MAX_RETRIES or {DEFAULT_MAX_RETRIES}). "
+        "Groq's 429 says how long to wait and that is obeyed; otherwise the "
+        "wait doubles per attempt.",
     )
     parser.add_argument(
         "--source",
-        choices=LOCAL_SOURCES,
-        help="Which biomni backend serves the model: Custom (any "
-        "OpenAI-compatible server, i.e. vLLM) or Ollama "
-        f"(default: $LLM_SOURCE or {DEFAULT_SOURCE}). Both drive A1, but only "
-        "Custom hands back separated reasoning traces.",
+        choices=SOURCES,
+        help="Which biomni backend answers the agent's calls "
+        f"(default: $LLM_SOURCE or {DEFAULT_SOURCE}). Only Groq is offered: "
+        "this pipeline does not serve its own model.",
     )
     parser.add_argument(
         "--batch-size",

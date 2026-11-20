@@ -7,10 +7,10 @@ that drug, and that a "resistant" call actually rests on a variant. Those checks
 are what separates a biologically grounded trace from a plausible-sounding one.
 
 Two traces are kept per prediction, because they can disagree: the reasoning the
-model wrote into its answer, and the hidden thinking the server separated out
-(vLLM's `reasoning` field, when it runs with a reasoning parser). The second is
-the one that shows how the call was actually reached, so it is stored verbatim
-for the biological-validity read-through.
+model wrote into its answer, and the hidden thinking Groq returned separately
+(its `reasoning` field, asked for per request — see tb_search.reasoning). The
+second is the one that shows how the call was actually reached, so it is stored
+verbatim for the biological-validity read-through.
 """
 
 from dataclasses import dataclass, field
@@ -107,7 +107,7 @@ class TraceCheck:
     call_grounded: bool = True
     # The call rests on a tier 1 gene rather than only a secondary one.
     tier1_support: bool = False
-    # Whether the server returned separated thinking for this call, and how
+    # Whether Groq returned separated thinking for this call, and how
     # much of it: an empty trace means there is nothing to read through, not
     # that the reasoning was sound.
     thinking_captured: bool = False
@@ -176,8 +176,8 @@ def check_trace(prediction: dict, variants: list[Variant], panel: Panel) -> Trac
     check.thinking_words = len(thinking.split())
     if not check.thinking_captured:
         check.notes.append(
-            "no separated reasoning trace returned; serve the model with a "
-            "vLLM reasoning parser to capture one"
+            "no separated reasoning trace returned; use a reasoning model and "
+            "a --reasoning-effort it accepts to capture one"
         )
     return check
 
@@ -187,9 +187,9 @@ def predict(
 ) -> dict | None:
     """One A1 run for one isolate/drug; None when no reply could be parsed.
 
-    The returned prediction carries `reasoning_trace`: the thinking the server
+    The returned prediction carries `reasoning_trace`: the thinking Groq
     separated from the answer, collected across every step of the run. It is
-    empty when the model was served without a reasoning parser and wrote none.
+    empty when the model is not a reasoning model and wrote none itself.
 
     The prompt hands the agent the whole variant list and tells it not to go
     looking, so the expected run is a single <solution> step — but it is still
@@ -231,7 +231,7 @@ def normalize_prediction(data: dict, reasoning_trace: str = "") -> dict:
         "genes_cited": _strings(data.get("genes_cited")),
         "mechanism": str(data.get("mechanism", "")).strip(),
         "reasoning": str(data.get("reasoning", "")).strip(),
-        # The server-separated thinking, kept verbatim: it is the trace whose
+        # The separately-returned thinking, kept verbatim: it is the trace whose
         # biological validity is being judged.
         "reasoning_trace": reasoning_trace.strip(),
         "unknown_reason": str(data.get("unknown_reason", "")).strip()
